@@ -1,0 +1,57 @@
+{
+  "name": "mindi-runtime",
+  "version": "0.1.0",
+  "description": "Provider-agnostic augmentation runtime for Large Language Models. One runtime. Any model. Unified capabilities.",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "bin": {
+    "mindi": "dist/cli/index.js",
+    "mindigenous": "dist/terminal/index.js",
+    "mindi-app": "dist/terminal/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsx watch examples/basic-usage.ts",
+    "cli": "tsx src/cli/index.ts",
+    "app": "tsx src/terminal/index.tsx",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "example": "tsx examples/basic-usage.ts",
+    "clean": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\""
+  },
+  "keywords": [
+    "ai",
+    "llm",
+    "runtime",
+    "augmentation",
+    "capabilities",
+    "provider-agnostic",
+    "openai",
+    "gemini"
+  ],
+  "license": "MIT",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0",
+    "vitest": "^2.1.0"
+  },
+  "dependencies": {
+    "@resvg/resvg-js": "^2.6.2",
+    "@types/react": "^18.3.31",
+    "ink": "^5.2.1",
+    "ink-text-input": "^6.0.0",
+    "react": "^18.3.1"
+  }
+}

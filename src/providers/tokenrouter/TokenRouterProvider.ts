@@ -1,0 +1,348 @@
+/**
+ * TokenRouter provider — OpenAI-compatible.
+ *
+ * Implements the TokenRouter API exactly as documented:
+ *   - Base URL: https://api.tokenrouter.com/v1 (configurable)
+ *   - Endpoint: /chat/completions (OpenAI-compatible)
+ *   - Auth: Bearer API key
+ *   - Streaming: Server-Sent Events (SSE), same format as OpenAI
+ *   - Models: any opaque model name (z-ai/glm-5.2-free, claude-opus-4.8, qwen-max, etc.)
+ *
+ * No model validation — model names are opaque strings passed through as-is.
+ *
+ * This is the reference implementation for any OpenAI-compatible provider.
+ * The same adapter covers OpenAI, OpenRouter, Groq, Together, DeepSeek,
+ * Fireworks, Ollama, LM Studio, Azure, vLLM, and any future compatible server
+ * — just by changing the baseUrl and apiKey.
+ */
+
+import type {
+  CapabilityType,
+  ChatChunk,
+  ChatRequest,
+  ExecutionContext,
+  ProviderHealth,
+  ProviderModel,
+} from "../../core/types.js";
+import { CapabilityType as Cap } from "../../core/types.js";
+import { BaseProvider } from "../BaseProvider.js";
+
+export interface TokenRouterProviderOptions {
+  apiKey: string;
+  baseUrl?: string;
+  displayName?: string;
+  headers?: Record<string, string>;
+  timeoutMs?: number;
+  models?: Record<string, { capabilities: CapabilityType[]; contextWindow?: number }>;
+}
+
+const DEFAULT_BASE_URL = "https://api.tokenrouter.com/v1";
+
+export class TokenRouterProvider extends BaseProvider {
+  readonly id = "tokenrouter";
+  readonly label: string;
+  protected readonly providerCapabilities: ReadonlySet<CapabilityType> = new Set([Cap.Chat]);
+  protected readonly opts: Required<TokenRouterProviderOptions>;
+
+  constructor(opts: TokenRouterProviderOptions) {
+    super();
+    this.opts = {
+      baseUrl: DEFAULT_BASE_URL,
+      displayName: "TokenRouter",
+      headers: {},
+      timeoutMs: 60_000,
+      models: {},
+      ...opts,
+    };
+    this.label = this.opts.displayName;
+  }
+
+  protected modelCapabilities(_modelId: string): CapabilityType[] {
+    // TokenRouter supports any model — no validation.
+    // Default to chat only; user can override via models config.
+    return [Cap.Chat];
+  }
+
+  protected async resolveDeclaration(modelId: string) {
+    const caps = this.modelCapabilities(modelId);
+    const override = this.opts.models[modelId];
+    if (override) {
+      return {
+        providerId: this.id,
+        modelId,
+        label: modelId,
+        capabilities: override.capabilities,
+        streaming: true,
+        toolCalling: true,
+        multimodal: override.capabilities.includes(Cap.Vision),
+        embeddingSupport: override.capabilities.includes(Cap.Embeddings),
+        imageGeneration: false,
+        audioSupport: false,
+        maxContext: override.contextWindow ?? 8192,
+        metadata: { baseUrl: this.opts.baseUrl },
+        resolvedAt: Date.now(),
+      };
+    }
+    return {
+      providerId: this.id,
+      modelId,
+      label: modelId,
+      capabilities: caps,
+      streaming: true,
+      toolCalling: true,
+      multimodal: false,
+      embeddingSupport: false,
+      imageGeneration: false,
+      audioSupport: false,
+      maxContext: 8192,
+      metadata: { baseUrl: this.opts.baseUrl },
+      resolvedAt: Date.now(),
+    };
+  }
+
+  async listModels(): Promise<ProviderModel[]> {
+    // TokenRouter may not have a /models endpoint.
+    // Return an empty list — the runtime treats model names as opaque strings.
+    try {
+      const ctx = makeSyntheticContext();
+      const res = await this.http(`${this.opts.baseUrl}/models`, { method: "GET" }, ctx);
+      const data = (await res.json()) as { data?: Array<{ id: string }> };
+      if (data.data) {
+        return data.data.map((m) => ({
+          id: m.id,
+          label: m.id,
+          capabilities: this.modelCapabilities(m.id),
+        }));
+      }
+    } catch {
+      // No /models endpoint — return empty. Model names are opaque.
+    }
+    return [];
+  }
+
+  async *chat(request: ChatRequest, ctx: ExecutionContext): AsyncIterable<ChatChunk> {
+    const url = `${this.opts.baseUrl}/chat/completions`;
+
+    // Build clean request body — only include defined fields.
+    // TokenRouter (and free models) may reject undefined/null values.
+    const body: Record<string, unknown> = {
+      model: request.model,
+      messages: request.messages.map(toOpenAIMessage),
+      stream: true,
+    };
+    // Only set max_tokens if explicitly provided — otherwise let the
+    // provider decide. Some free models reject high token counts.
+    if (request.maxTokens) {
+      body.max_tokens = request.maxTokens;
+    }
+    if (request.temperature !== undefined) {
+      body.temperature = request.temperature;
+    }
+    if (request.stop && request.stop.length > 0) {
+      body.stop = request.stop;
+    }
+
+    // No timeout on chat — let the stream run until the model finishes.
+    // The user can Ctrl+C to interrupt.
+    const res = await this.http(url, {
+      method: "POST",
+      headers: this.headers(),
+      body: JSON.stringify(body),
+      timeoutMs: 0, // 0 = no timeout
+    }, ctx);
+
+    if (!res.body) {
+      throw new Error(`TokenRouter: empty response body`);
+    }
+
+    yield* parseSSEStream(res.body, ctx);
+  }
+
+  async health(): Promise<ProviderHealth> {
+    const start = Date.now();
+    const ctx = makeSyntheticContext();
+
+    // Try /models first (fast, lightweight).
+    try {
+      await this.http(`${this.opts.baseUrl}/models`, {
+        method: "GET",
+        headers: this.headers(),
+        timeoutMs: 15_000,
+      }, ctx);
+      return { providerId: this.id, ok: true, latencyMs: Date.now() - start };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+
+      // Auth error = key is wrong, don't bother with chat test.
+      if (msg.includes("401") || msg.includes("403") || msg.includes("Token not provided")) {
+        return { providerId: this.id, ok: false, latencyMs: Date.now() - start, error: `Authentication failed: ${msg}` };
+      }
+
+      // If it's a timeout, the provider might be slow or unreachable.
+      if (msg.includes("aborted") || msg.includes("timeout") || msg.includes("TIMED_OUT")) {
+        return { providerId: this.id, ok: false, latencyMs: Date.now() - start, error: `Connection timed out (15s). Check your network and base URL.` };
+      }
+
+      // For 400/404/422 — the provider is reachable, just the endpoint doesn't exist.
+      // Try a chat completion to verify credentials.
+      try {
+        await this.http(`${this.opts.baseUrl}/chat/completions`, {
+          method: "POST",
+          headers: this.headers(),
+          body: JSON.stringify({
+            model: "z-ai/glm-5.2-free",
+            messages: [{ role: "user", content: "hi" }],
+            max_tokens: 1,
+            stream: false,
+          }),
+          timeoutMs: 20_000,
+        }, ctx);
+        return { providerId: this.id, ok: true, latencyMs: Date.now() - start };
+      } catch (err2) {
+        const msg2 = err2 instanceof Error ? err2.message : String(err2);
+        if (msg2.includes("401") || msg2.includes("403") || msg2.includes("Token not provided")) {
+          return { providerId: this.id, ok: false, latencyMs: Date.now() - start, error: `Authentication failed: ${msg2}` };
+        }
+        // 400/404/422 = provider reachable, credentials valid, just model not found.
+        if (msg2.includes("400") || msg2.includes("404") || msg2.includes("422")) {
+          return { providerId: this.id, ok: true, latencyMs: Date.now() - start };
+        }
+        return { providerId: this.id, ok: false, latencyMs: Date.now() - start, error: msg2 };
+      }
+    }
+  }
+
+  private headers(): Record<string, string> {
+    const h: Record<string, string> = {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${this.opts.apiKey}`,
+    };
+    for (const [k, v] of Object.entries(this.opts.headers)) {
+      h[k] = v;
+    }
+    return h;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// OpenAI-compatible message conversion (shared by all OpenAI-compatible providers)
+// ---------------------------------------------------------------------------
+
+function toOpenAIMessage(m: ChatRequest["messages"][number]): Record<string, unknown> {
+  // Convert non-standard roles to OpenAI-compatible roles.
+  // "capability" messages (from MINDI augmentation) become "system" messages
+  // so the model treats them as context instructions.
+  const role = m.role === "capability" ? "system" : m.role;
+  const out: Record<string, unknown> = { role, content: normalizeContent(m.content) };
+  if (m.name) out.name = m.name;
+  return out;
+}
+
+function normalizeContent(content: import("../../core/types.js").ChatContent): unknown {
+  if (typeof content === "string") return content;
+  return content.map((part) => {
+    switch (part.type) {
+      case "text": return { type: "text", text: part.text };
+      case "image": return { type: "image_url", image_url: { url: `data:${part.mimeType};base64,${part.base64}` } };
+      case "image_url": return { type: "image_url", image_url: { url: part.url } };
+    }
+  });
+}
+
+// ---------------------------------------------------------------------------
+// SSE stream parser (OpenAI-compatible format)
+// ---------------------------------------------------------------------------
+
+async function* parseSSEStream(
+  body: ReadableStream<Uint8Array>,
+  ctx: ExecutionContext,
+): AsyncIterable<ChatChunk> {
+  const reader = body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let totalCompletionTokens = 0;
+  let gotContent = false;
+
+  try {
+    while (true) {
+      if (ctx.signal.aborted) {
+        await reader.cancel();
+        return;
+      }
+      let done = false;
+      let value: Uint8Array | undefined;
+      try {
+        const result = await reader.read();
+        done = result.done;
+        value = result.value as Uint8Array;
+      } catch {
+        // Connection terminated (ERR_STREAM_PREMATURE_CLOSE, "terminated", etc.)
+        // This happens when the server closes the connection after sending
+        // all content but before sending [DONE].
+        // Emit a done so the Runtime keeps whatever was streamed.
+        break;
+      }
+      if (done) break;
+      if (!value) continue;
+      buffer += decoder.decode(value, { stream: true });
+
+      let nlIdx: number;
+      while ((nlIdx = buffer.indexOf("\n")) >= 0) {
+        const line = buffer.slice(0, nlIdx).trim();
+        buffer = buffer.slice(nlIdx + 1);
+        if (!line || line.startsWith(":")) continue;
+        if (!line.startsWith("data:")) continue;
+        const data = line.slice(5).trim();
+        if (data === "[DONE]") {
+          yield { done: true, finishReason: "stop", usage: { completionTokens: totalCompletionTokens } };
+          return;
+        }
+        try {
+          const json = JSON.parse(data) as {
+            choices?: Array<{ delta?: { content?: string }; finish_reason?: string }>;
+            usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number };
+          };
+          const choice = json.choices?.[0];
+          const delta = choice?.delta?.content;
+          if (delta) {
+            gotContent = true;
+            totalCompletionTokens += Math.ceil(delta.length / 4);
+            yield { delta };
+          }
+          if (choice?.finish_reason) {
+            yield {
+              done: true,
+              finishReason: choice.finish_reason as ChatChunk["finishReason"],
+              usage: {
+                promptTokens: json.usage?.prompt_tokens,
+                completionTokens: json.usage?.completion_tokens ?? totalCompletionTokens,
+                totalTokens: json.usage?.total_tokens,
+              },
+            };
+            return;
+          }
+        } catch {
+          // Skip malformed chunks.
+        }
+      }
+    }
+    // Stream ended (either naturally or terminated) — emit done.
+    yield { done: true, finishReason: gotContent ? "stop" : "length", usage: { completionTokens: totalCompletionTokens } };
+  } finally {
+    reader.releaseLock();
+  }
+}
+
+function makeSyntheticContext(): ExecutionContext {
+  const ctrl = new AbortController();
+  return {
+    requestId: `provider-${Math.random().toString(36).slice(2, 10)}`,
+    sessionId: "provider-internal",
+    signal: ctrl.signal,
+    log: {
+      trace() {}, debug() {}, info() {}, warn() {}, error() {},
+      child() { return this; },
+    },
+    events: { emit() {}, on() { return () => {} }, clear() {} },
+  };
+}
