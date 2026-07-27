@@ -1,0 +1,120 @@
+@import "tailwindcss";
+
+@theme {
+  /* ── MINDIGENOUS palette · deep navy / space blue ─────────────── */
+  --color-abyss: #020914;
+  --color-navy-950: #041021;
+  --color-navy-900: #061528;
+  --color-navy-800: #0a1f3a;
+  --color-mist: #8fa3bf;
+  --color-faint: #5b6f8f;
+  --color-glow: #3b82f6;
+  --color-glow-soft: #60a5fa;
+  --color-glow-cyan: #38bdf8;
+  --color-glow-indigo: #6366f1;
+
+  --font-sans: var(--font-geist-sans), ui-sans-serif, system-ui, sans-serif;
+  --font-mono: var(--font-geist-mono), ui-monospace, "SF Mono", monospace;
+
+  --animate-drift-slow: drift 26s ease-in-out infinite alternate;
+  --animate-drift-slower: drift 34s ease-in-out infinite alternate-reverse;
+  --animate-pulse-glow: pulseGlow 7s ease-in-out infinite;
+  --animate-caret: caret 1.05s step-end infinite;
+
+  @keyframes drift {
+    0% { transform: translate3d(0, 0, 0) scale(1); }
+    50% { transform: translate3d(4%, -3%, 0) scale(1.08); }
+    100% { transform: translate3d(-3%, 4%, 0) scale(0.96); }
+  }
+  @keyframes pulseGlow {
+    0%, 100% { opacity: 0.55; }
+    50% { opacity: 1; }
+  }
+  @keyframes caret {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0; }
+  }
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
+html,
+body {
+  overflow-x: clip;
+}
+
+body {
+  background: var(--color-abyss);
+  color: #f8fafc;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+::selection {
+  background: rgb(59 130 246 / 0.35);
+  color: #ffffff;
+}
+
+/* Thin quiet scrollbar */
+::-webkit-scrollbar { width: 10px; }
+::-webkit-scrollbar-track { background: var(--color-abyss); }
+::-webkit-scrollbar-thumb {
+  background: #12294a;
+  border-radius: 8px;
+  border: 2px solid var(--color-abyss);
+}
+::-webkit-scrollbar-thumb:hover { background: #1c3a66; }
+
+/* ── Signature utilities ──────────────────────────────────────── */
+
+.glass {
+  background: linear-gradient(180deg, rgb(255 255 255 / 0.05), rgb(255 255 255 / 0.02));
+  border: 1px solid rgb(255 255 255 / 0.08);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+}
+
+.hairline {
+  height: 1px;
+  background: linear-gradient(90deg, transparent, rgb(96 165 250 / 0.22), transparent);
+  border: none;
+}
+
+.text-glow {
+  text-shadow: 0 0 32px rgb(59 130 246 / 0.45), 0 0 90px rgb(59 130 246 / 0.2);
+}
+
+.card-lift {
+  transition: transform 0.35s cubic-bezier(0.22, 1, 0.36, 1), border-color 0.35s, background 0.35s, box-shadow 0.35s;
+}
+.card-lift:hover {
+  transform: translateY(-3px);
+  border-color: rgb(96 165 250 / 0.28);
+  box-shadow: 0 12px 44px -12px rgb(59 130 246 / 0.22), 0 0 0 1px rgb(96 165 250 / 0.06);
+}
+
+/* Mouse spotlight layer (driven by CSS vars from Aurora) */
+.spotlight::after {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 1;
+  background: radial-gradient(
+    560px circle at var(--spot-x, 50%) var(--spot-y, 18%),
+    rgb(96 165 250 / 0.055),
+    transparent 72%
+  );
+}
+
+/* Subtle blueprint grid for hero */
+.bg-grid {
+  background-image:
+    linear-gradient(rgb(148 163 184 / 0.05) 1px, transparent 1px),
+    linear-gradient(90deg, rgb(148 163 184 / 0.05) 1px, transparent 1px);
+  background-size: 72px 72px;
+  mask-image: radial-gradient(ellipse 90% 62% at 50% 0%, black 30%, transparent 78%);
+  -webkit-mask-image: radial-gradient(ellipse 90% 62% at 50% 0%, black 30%, transparent 78%);
+}
