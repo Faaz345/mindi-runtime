@@ -26,6 +26,11 @@ import type {
 } from "../../core/types.js";
 import { CapabilityType as Cap } from "../../core/types.js";
 import { BaseProvider } from "../BaseProvider.js";
+import {
+  buildProfile,
+  normalizeOpenAIModelMetadata,
+} from "../../capability/CapabilityDetector.js";
+import type { RawModelMetadata } from "../../capability/types.js";
 
 export interface TokenRouterProviderOptions {
   apiKey: string;
@@ -57,14 +62,31 @@ export class TokenRouterProvider extends BaseProvider {
     this.label = this.opts.displayName;
   }
 
-  protected modelCapabilities(_modelId: string): CapabilityType[] {
-    // TokenRouter supports any model — no validation.
-    // Default to chat only; user can override via models config.
-    return [Cap.Chat];
+  protected modelCapabilities(modelId: string): CapabilityType[] {
+    const override = this.opts.models?.[modelId];
+    if (override) return override.capabilities;
+    // Delegate to the shared detector (universal heuristic) — TokenRouter
+    // model names are opaque, but multimodal naming conventions still apply.
+    return buildProfile(this.id, modelId).nativeCapabilities;
+  }
+
+  /**
+   * Raw metadata discovery — TokenRouter is OpenAI-compatible, so if it
+   * exposes /models we normalize whatever it returns.
+   */
+  async discoverModels(): Promise<RawModelMetadata[] | undefined> {
+    try {
+      const ctx = makeSyntheticContext();
+      const res = await this.http(`${this.opts.baseUrl}/models`, { method: "GET" }, ctx);
+      const data = (await res.json()) as { data?: Array<Record<string, unknown>> };
+      if (!Array.isArray(data.data)) return undefined;
+      return data.data.map(normalizeOpenAIModelMetadata);
+    } catch {
+      return undefined;
+    }
   }
 
   protected async resolveDeclaration(modelId: string) {
-    const caps = this.modelCapabilities(modelId);
     const override = this.opts.models[modelId];
     if (override) {
       return {
@@ -79,23 +101,34 @@ export class TokenRouterProvider extends BaseProvider {
         imageGeneration: false,
         audioSupport: false,
         maxContext: override.contextWindow ?? 8192,
-        metadata: { baseUrl: this.opts.baseUrl },
+        metadata: { baseUrl: this.opts.baseUrl, metadataSource: "manual" },
         resolvedAt: Date.now(),
       };
     }
+    // Metadata-first: try /models/{id}, fall back to the universal heuristic.
+    let raw: RawModelMetadata | undefined;
+    try {
+      const ctx = makeSyntheticContext();
+      const res = await this.http(`${this.opts.baseUrl}/models/${modelId}`, { method: "GET" }, ctx);
+      raw = normalizeOpenAIModelMetadata((await res.json()) as Record<string, unknown>);
+    } catch {
+      raw = undefined;
+    }
+    const profile = buildProfile(this.id, modelId, raw, raw ? "api" : "heuristic");
     return {
       providerId: this.id,
       modelId,
-      label: modelId,
-      capabilities: caps,
+      label: profile.label ?? modelId,
+      capabilities: profile.nativeCapabilities,
       streaming: true,
-      toolCalling: true,
-      multimodal: false,
-      embeddingSupport: false,
-      imageGeneration: false,
-      audioSupport: false,
-      maxContext: 8192,
-      metadata: { baseUrl: this.opts.baseUrl },
+      toolCalling: profile.toolCalling,
+      multimodal: profile.vision,
+      embeddingSupport: profile.embeddings,
+      imageGeneration: profile.imageGeneration,
+      audioSupport: profile.audioInput || profile.audioOutput,
+      maxContext: profile.contextWindow ?? 8192,
+      maxOutputTokens: profile.maxOutputTokens,
+      metadata: { baseUrl: this.opts.baseUrl, metadataSource: profile.metadataSource },
       resolvedAt: Date.now(),
     };
   }
@@ -106,13 +139,19 @@ export class TokenRouterProvider extends BaseProvider {
     try {
       const ctx = makeSyntheticContext();
       const res = await this.http(`${this.opts.baseUrl}/models`, { method: "GET" }, ctx);
-      const data = (await res.json()) as { data?: Array<{ id: string }> };
+      const data = (await res.json()) as { data?: Array<Record<string, unknown>> };
       if (data.data) {
-        return data.data.map((m) => ({
-          id: m.id,
-          label: m.id,
-          capabilities: this.modelCapabilities(m.id),
-        }));
+        return data.data.map((m) => {
+          const raw = normalizeOpenAIModelMetadata(m);
+          const profile = buildProfile(this.id, raw.id, raw, raw.inputModalities || raw.modality ? "api" : "heuristic");
+          const override = this.opts.models?.[raw.id];
+          return {
+            id: raw.id,
+            label: raw.label ?? raw.id,
+            capabilities: override?.capabilities ?? profile.nativeCapabilities,
+            contextWindow: override?.contextWindow ?? profile.contextWindow,
+          };
+        });
       }
     } catch {
       // No /models endpoint — return empty. Model names are opaque.

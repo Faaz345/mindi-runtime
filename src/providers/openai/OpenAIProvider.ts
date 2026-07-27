@@ -13,6 +13,11 @@ import type {
 import { CapabilityType as Cap } from "../../core/types.js";
 import { ProviderError } from "../../core/errors.js";
 import { BaseProvider } from "../BaseProvider.js";
+import {
+  buildProfile,
+  normalizeOpenAIModelMetadata,
+} from "../../capability/CapabilityDetector.js";
+import type { RawModelMetadata } from "../../capability/types.js";
 
 /**
  * OpenAI-compatible provider.
@@ -23,32 +28,34 @@ import { BaseProvider } from "../BaseProvider.js";
  *   - Groq, Together, Fireworks, vLLM, LM Studio
  *   - Any future OpenAI-compatible server
  *
- * Declared native capabilities:
- *   - chat        (always — that's what /chat/completions is for)
- *   - vision      (model-dependent; we declare it for known multimodal models)
- *   - embeddings  (via /embeddings)
- *   - image_generation (via /images/generations — DALL-E class)
+ * Capability detection is MODEL-CENTRIC and metadata-first:
+ *   - discoverModels() returns raw metadata from /models (OpenRouter returns
+ *     rich architecture/modality data; plain OpenAI returns bare ids).
+ *   - The shared CapabilityDetector derives capabilities from that metadata.
+ *   - A universal naming heuristic is the last-resort fallback only.
+ *   - NO hardcoded model lists. New multimodal models are detected
+ *     automatically whenever the provider exposes modality metadata.
  */
 export interface OpenAIProviderOptions {
   apiKey: string;
   baseUrl?: string;
   orgId?: string;
-  /** Override capability table for non-standard models */
+  displayName?: string;
   models?: Record<string, { capabilities: CapabilityType[]; contextWindow?: number }>;
+  /**
+   * OpenRouter-style strict routing: send `provider.require_parameters=true`
+   * so requests only route to upstreams that accept every parameter in the
+   * request (including image content parts). Defaults to true when the
+   * baseUrl points at openrouter.ai, false elsewhere.
+   */
+  requireParameters?: boolean;
 }
 
 const DEFAULT_BASE_URL = "https://api.openai.com/v1";
 
-/** Models we know support vision. Used only if user doesn't override. */
-const KNOWN_VISION_MODELS = [
-  "gpt-4o", "gpt-4o-mini", "gpt-4o-2024",
-  "gpt-4-turbo", "gpt-4-vision",
-  "gpt-4.1", "gpt-4.1-mini", "gpt-4.1-nano",
-];
-
 export class OpenAIProvider extends BaseProvider {
-  readonly id = "openai";
-  readonly label = "OpenAI-compatible";
+  readonly id: string;
+  readonly label: string;
   protected readonly providerCapabilities: ReadonlySet<CapabilityType> = new Set([
     Cap.Chat,
     Cap.Vision,
@@ -56,72 +63,101 @@ export class OpenAIProvider extends BaseProvider {
     Cap.ImageGeneration,
   ]);
 
-  private readonly opts: Required<OpenAIProviderOptions>;
+  private readonly opts: Required<Omit<OpenAIProviderOptions, "requireParameters">>;
+  /** Strict-routing flag; undefined = auto (on for openrouter.ai). */
+  private readonly requireParameters?: boolean;
 
   constructor(opts: OpenAIProviderOptions) {
     super();
+    const { requireParameters, ...rest } = opts;
+    this.requireParameters = requireParameters;
     this.opts = {
       baseUrl: DEFAULT_BASE_URL,
       orgId: "",
+      displayName: "",
       models: {},
-      ...opts,
+      ...rest,
     };
+    this.id = this.opts.displayName?.toLowerCase().replace(/\s+/g, "-") || "openai";
+    this.label = this.opts.displayName || "OpenAI-compatible";
+  }
+
+  /**
+   * Effective strict-routing setting. On OpenRouter, default ON: image
+   * requests then fail loudly (404) instead of being silently routed to an
+   * upstream that drops the image parts.
+   */
+  private get strictRouting(): boolean {
+    return this.requireParameters ?? this.opts.baseUrl.includes("openrouter.ai");
   }
 
   protected modelCapabilities(modelId: string): CapabilityType[] {
     const override = this.opts.models?.[modelId];
     if (override) return override.capabilities;
-    const caps: CapabilityType[] = [Cap.Chat];
-    if (KNOWN_VISION_MODELS.some((p) => modelId.startsWith(p))) caps.push(Cap.Vision);
-    if (modelId.includes("text-embedding")) caps.push(Cap.Embeddings);
-    if (modelId.startsWith("dall-e") || modelId.includes("image")) caps.push(Cap.ImageGeneration);
-    return caps;
+    // Delegate to the shared detector — no hardcoded lists here.
+    return buildProfile(this.id, modelId).nativeCapabilities;
   }
 
   /**
-   * Real capability discovery for OpenAI-compatible models.
-   * Calls /models to get metadata, then infers capabilities from model id
-   * + known patterns. User-provided override table takes precedence.
+   * Raw metadata discovery: returns whatever /models exposes.
+   * OpenRouter returns architecture/modality/parameter data per model;
+   * plain OpenAI-compatible servers return bare ids (detection falls back
+   * to the universal heuristic for those).
+   */
+  async discoverModels(): Promise<RawModelMetadata[] | undefined> {
+    try {
+      const ctx = makeSyntheticContext();
+      const res = await this.http(`${this.opts.baseUrl}/models`, { method: "GET" }, ctx);
+      const data = (await res.json()) as { data?: Array<Record<string, unknown>> };
+      if (!Array.isArray(data.data)) return undefined;
+      return data.data.map(normalizeOpenAIModelMetadata);
+    } catch {
+      return undefined;
+    }
+  }
+
+  /**
+   * Resolve a capability declaration for one model. Metadata-first:
+   * tries /models/{id} for OpenRouter-style modality data, then falls back
+   * to the shared detector's heuristic.
    */
   protected async resolveDeclaration(modelId: string): Promise<ProviderCapabilityDeclaration> {
-    const caps = this.modelCapabilities(modelId);
-    const isVision = caps.includes(Cap.Vision);
-    const isEmbedding = caps.includes(Cap.Embeddings);
-    const isImageGen = caps.includes(Cap.ImageGeneration);
-    const isGpt4 = modelId.startsWith("gpt-4");
-    const isO1 = modelId.startsWith("o1") || modelId.startsWith("o3") || modelId.startsWith("o4");
+    const override = this.opts.models?.[modelId];
 
-    // Try to get context window from the models endpoint.
-    let maxContext = 8192;
-    let label = modelId;
+    let raw: RawModelMetadata | undefined;
     try {
       const ctx = makeSyntheticContext();
       const res = await this.http(`${this.opts.baseUrl}/models/${modelId}`, { method: "GET" }, ctx);
-      const data = (await res.json()) as { id: string; context_window?: number; max_tokens?: number };
-      if (data.context_window) maxContext = data.context_window;
-      label = data.id ?? modelId;
+      raw = normalizeOpenAIModelMetadata((await res.json()) as Record<string, unknown>);
     } catch {
-      // If the /models/{id} endpoint doesn't exist (some compatible servers),
-      // fall back to heuristic context window.
-      maxContext = inferContextWindow(modelId);
+      raw = undefined;
     }
+
+    const profile = buildProfile(this.id, modelId, raw, raw ? "api" : "heuristic");
+
+    // Manual per-model override always wins.
+    const capabilities = override?.capabilities ?? profile.nativeCapabilities;
+    const isVision = capabilities.includes(Cap.Vision);
+    const isEmbedding = capabilities.includes(Cap.Embeddings);
+    const isImageGen = capabilities.includes(Cap.ImageGeneration);
+    const isO1 = modelId.startsWith("o1") || modelId.startsWith("o3") || modelId.startsWith("o4");
 
     return {
       providerId: this.id,
       modelId,
-      label,
-      capabilities: caps,
-      streaming: !isO1, // o1/o3/o4 models don't support streaming initially
-      toolCalling: isGpt4 || modelId.startsWith("gpt-3.5-turbo") || isO1,
+      label: profile.label ?? modelId,
+      capabilities,
+      streaming: !isO1,
+      toolCalling: profile.toolCalling,
       multimodal: isVision,
       embeddingSupport: isEmbedding,
       imageGeneration: isImageGen,
-      audioSupport: modelId.includes("audio") || modelId.includes("whisper") || modelId.includes("tts"),
-      maxContext,
-      maxOutputTokens: isGpt4 ? 4096 : 2048,
+      audioSupport: profile.audioInput || profile.audioOutput || modelId.includes("audio") || modelId.includes("whisper") || modelId.includes("tts"),
+      maxContext: override?.contextWindow ?? profile.contextWindow ?? 8192,
+      maxOutputTokens: profile.maxOutputTokens,
       metadata: {
         baseUrl: this.opts.baseUrl,
-        family: inferModelFamily(modelId),
+        metadataSource: profile.metadataSource,
       },
       resolvedAt: Date.now(),
     };
@@ -130,13 +166,16 @@ export class OpenAIProvider extends BaseProvider {
   async listModels(): Promise<ProviderModel[]> {
     const ctx = makeSyntheticContext();
     const res = await this.http(`${this.opts.baseUrl}/models`, { method: "GET" }, ctx);
-    const data = (await res.json()) as { data: Array<{ id: string }> };
+    const data = (await res.json()) as { data: Array<Record<string, unknown>> };
     return data.data.map((m) => {
-      const caps = this.modelCapabilities(m.id);
+      const raw = normalizeOpenAIModelMetadata(m);
+      const profile = buildProfile(this.id, raw.id, raw, raw.inputModalities || raw.modality ? "api" : "heuristic");
+      const override = this.opts.models?.[raw.id];
       return {
-        id: m.id,
-        label: m.id,
-        capabilities: caps,
+        id: raw.id,
+        label: raw.label ?? raw.id,
+        capabilities: override?.capabilities ?? profile.nativeCapabilities,
+        contextWindow: override?.contextWindow ?? profile.contextWindow,
       };
     });
   }
@@ -152,6 +191,18 @@ export class OpenAIProvider extends BaseProvider {
     if (request.maxTokens) body.max_tokens = request.maxTokens;
     if (request.temperature !== undefined) body.temperature = request.temperature;
     if (request.stop && request.stop.length > 0) body.stop = request.stop;
+    // Native function calling: only when the caller supplied tool defs.
+    // Models that don't support tools simply ignore these fields.
+    if (request.tools && request.tools.length > 0) {
+      body.tools = request.tools.map((t) => ({
+        type: "function",
+        function: { name: t.name, description: t.description, parameters: t.parameters },
+      }));
+      body.tool_choice = "auto";
+    }
+    // OpenRouter strict routing: only use upstreams that accept every
+    // parameter in this request (prevents silent image dropping).
+    if (this.strictRouting) body.provider = { require_parameters: true };
     const res = await this.http(
       url,
       {
@@ -249,34 +300,55 @@ export class OpenAIProvider extends BaseProvider {
     };
   }
 
-  /** Native OpenAI vision — send image+prompt, get a text description. */
+  /** Native vision — send image+prompt to a vision-capable model on this provider. */
   private async vision(
     input: CapabilityInput,
     ctx: ExecutionContext,
     start: number,
   ): Promise<CapabilityResult> {
-    const prompt = String(input.params.prompt ?? "Describe this image.");
+    const prompt = String(input.params.prompt ?? "Analyze this image in detail.");
     const image = String(input.params.image ?? ""); // base64 data URI or URL
-    const model = String(input.params.model ?? "gpt-4o");
+
+    // Resolve the model to use for vision. The planner usually does NOT pass
+    // params.model, and the provider's displayName ("custom", "OpenRouter",
+    // ...) is NOT a model id — sending it yields HTTP 400 "not a valid model
+    // ID". Resolve a real vision-capable model from this provider instead.
+    let model = typeof input.params.model === "string" ? input.params.model : "";
+    if (!model || model === this.id || model === this.opts.displayName) {
+      model = (await this.resolveVisionModel()) ?? "";
+    }
+    if (!model) {
+      return {
+        type: Cap.Vision,
+        source: this.id,
+        ok: false,
+        payload: { kind: "text", text: "" },
+        error: `No vision-capable model available on provider "${this.id}". Register one or attach the image directly.`,
+        durationMs: Date.now() - start,
+      };
+    }
+
     const url = `${this.opts.baseUrl}/chat/completions`;
+    const visionBody: Record<string, unknown> = {
+      model,
+      messages: [
+        {
+          role: "user",
+          content: [
+            { type: "text", text: prompt },
+            { type: "image_url", image_url: { url: image } },
+          ],
+        },
+      ],
+      max_tokens: 2000,
+    };
+    if (this.strictRouting) visionBody.provider = { require_parameters: true };
     const res = await this.http(
       url,
       {
         method: "POST",
         headers: this.headers(),
-        body: JSON.stringify({
-          model,
-          messages: [
-            {
-              role: "user",
-              content: [
-                { type: "text", text: prompt },
-                { type: "image_url", image_url: { url: image } },
-              ],
-            },
-          ],
-          max_tokens: 1000,
-        }),
+        body: JSON.stringify(visionBody),
       },
       ctx,
     );
@@ -298,19 +370,81 @@ export class OpenAIProvider extends BaseProvider {
     };
   }
 
+  /**
+   * Resolve a vision-capable model from this provider's own model list.
+   * Prefers free-tier variants (":free" suffix) to avoid burning paid quota
+   * on augmentation, then any vision-capable model. Cached for 5 minutes so
+   * repeated vision calls don't re-hit /models.
+   */
+  private visionModelCache: { model: string; expiresAt: number } | null = null;
+  private async resolveVisionModel(): Promise<string | null> {
+    if (this.visionModelCache && this.visionModelCache.expiresAt > Date.now()) {
+      return this.visionModelCache.model;
+    }
+    try {
+      const models = await this.listModels();
+      const visionModels = models.filter((m) => m.capabilities.includes(Cap.Vision));
+      if (visionModels.length === 0) return null;
+      // Prefer free-tier variants first, then the rest in listed order.
+      const free = visionModels.find((m) => m.id.endsWith(":free"));
+      const picked = (free ?? visionModels[0]!).id;
+      this.visionModelCache = { model: picked, expiresAt: Date.now() + 5 * 60 * 1000 };
+      return picked;
+    } catch {
+      return null;
+    }
+  }
+
   async health(): Promise<ProviderHealth> {
     const start = Date.now();
+    const ctx = makeSyntheticContext();
+
+    // Try /models first.
     try {
-      const ctx = makeSyntheticContext();
-      const res = await this.http(`${this.opts.baseUrl}/models`, { method: "GET" }, ctx);
-      return { providerId: this.id, ok: res.ok, latencyMs: Date.now() - start };
+      await this.http(`${this.opts.baseUrl}/models`, {
+        method: "GET",
+        headers: this.headers(),
+        timeoutMs: 15_000,
+      }, ctx);
+      return { providerId: this.id, ok: true, latencyMs: Date.now() - start };
     } catch (err) {
-      return {
-        providerId: this.id,
-        ok: false,
-        latencyMs: Date.now() - start,
-        error: err instanceof Error ? err.message : String(err),
-      };
+      const msg = err instanceof Error ? err.message : String(err);
+
+      // Auth error = key is wrong.
+      if (msg.includes("401") || msg.includes("403")) {
+        return { providerId: this.id, ok: false, latencyMs: Date.now() - start, error: msg };
+      }
+
+      // Timeout = provider unreachable.
+      if (msg.includes("aborted") || msg.includes("timeout")) {
+        return { providerId: this.id, ok: false, latencyMs: Date.now() - start, error: `Connection timed out. Check your base URL: ${this.opts.baseUrl}` };
+      }
+
+      // For 404/400/etc — try a chat completion to verify credentials.
+      try {
+        await this.http(`${this.opts.baseUrl}/chat/completions`, {
+          method: "POST",
+          headers: this.headers(),
+          body: JSON.stringify({
+            model: "gpt-4o-mini",
+            messages: [{ role: "user", content: "hi" }],
+            max_tokens: 1,
+            stream: false,
+          }),
+          timeoutMs: 20_000,
+        }, ctx);
+        return { providerId: this.id, ok: true, latencyMs: Date.now() - start };
+      } catch (err2) {
+        const msg2 = err2 instanceof Error ? err2.message : String(err2);
+        if (msg2.includes("401") || msg2.includes("403")) {
+          return { providerId: this.id, ok: false, latencyMs: Date.now() - start, error: msg2 };
+        }
+        // 400/404 = provider reachable, just the test model doesn't exist.
+        if (msg2.includes("400") || msg2.includes("404") || msg2.includes("422")) {
+          return { providerId: this.id, ok: true, latencyMs: Date.now() - start };
+        }
+        return { providerId: this.id, ok: false, latencyMs: Date.now() - start, error: msg2 };
+      }
     }
   }
 
@@ -330,6 +464,15 @@ function toOpenAIMessage(m: ChatRequest["messages"][number]): Record<string, unk
   const role = m.role === "capability" ? "system" : m.role;
   const out: Record<string, unknown> = { role, content: normalizeContent(m.content) };
   if (m.name) out.name = m.name;
+  // Native function-calling wire fields.
+  if (role === "tool" && m.toolCallId) out.tool_call_id = m.toolCallId;
+  if (m.toolCalls && m.toolCalls.length > 0) {
+    out.tool_calls = m.toolCalls.map((c) => ({
+      id: c.id,
+      type: "function",
+      function: { name: c.name, arguments: c.argumentsJson },
+    }));
+  }
   return out;
 }
 
@@ -360,6 +503,16 @@ async function* parseSSEStream(
   let buffer = "";
   let totalCompletionTokens = 0;
   let gotContent = false;
+  // Native tool calls stream in index-addressed fragments:
+  //   delta.tool_calls: [{ index, id?, function?: { name?, arguments? } }]
+  // Accumulate per index; emit the complete set on the final chunk.
+  const toolCallAcc = new Map<number, { id: string; name: string; args: string }>();
+  const collectToolCalls = (): ChatChunk["toolCalls"] => {
+    if (toolCallAcc.size === 0) return undefined;
+    return [...toolCallAcc.entries()]
+      .sort((a, b) => a[0] - b[0])
+      .map(([, c], pos) => ({ id: c.id || `call_${pos}`, name: c.name, argumentsJson: c.args }));
+  };
 
   try {
     while (true) {
@@ -389,12 +542,28 @@ async function* parseSSEStream(
         if (!line.startsWith("data:")) continue;
         const data = line.slice(5).trim();
         if (data === "[DONE]") {
-          yield { done: true, finishReason: "stop", usage: { completionTokens: totalCompletionTokens } };
+          yield {
+            done: true,
+            finishReason: toolCallAcc.size > 0 ? "tool_call" : "stop",
+            usage: { completionTokens: totalCompletionTokens },
+            toolCalls: collectToolCalls(),
+          };
           return;
         }
         try {
           const json = JSON.parse(data) as {
-            choices?: Array<{ delta?: { content?: string }; finish_reason?: string }>;
+            choices?: Array<{
+              delta?: {
+                content?: string;
+                tool_calls?: Array<{
+                  index?: number;
+                  id?: string;
+                  type?: string;
+                  function?: { name?: string; arguments?: string };
+                }>;
+              };
+              finish_reason?: string;
+            }>;
             usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number };
           };
           const choice = json.choices?.[0];
@@ -404,15 +573,28 @@ async function* parseSSEStream(
             totalCompletionTokens += Math.ceil(delta.length / 4);
             yield { delta };
           }
+          const tcFragments = choice?.delta?.tool_calls;
+          if (tcFragments) {
+            gotContent = true;
+            for (const frag of tcFragments) {
+              const idx = frag.index ?? 0;
+              const cur = toolCallAcc.get(idx) ?? { id: "", name: "", args: "" };
+              if (frag.id) cur.id = frag.id;
+              if (frag.function?.name) cur.name += frag.function.name;
+              if (frag.function?.arguments) cur.args += frag.function.arguments;
+              toolCallAcc.set(idx, cur);
+            }
+          }
           if (choice?.finish_reason) {
             yield {
               done: true,
-              finishReason: choice.finish_reason as ChatChunk["finishReason"],
+              finishReason: (choice.finish_reason === "tool_calls" ? "tool_call" : choice.finish_reason) as ChatChunk["finishReason"],
               usage: {
                 promptTokens: json.usage?.prompt_tokens,
                 completionTokens: json.usage?.completion_tokens ?? totalCompletionTokens,
                 totalTokens: json.usage?.total_tokens,
               },
+              toolCalls: collectToolCalls(),
             };
             return;
           }
@@ -421,7 +603,12 @@ async function* parseSSEStream(
         }
       }
     }
-    yield { done: true, finishReason: gotContent ? "stop" : "length", usage: { completionTokens: totalCompletionTokens } };
+    yield {
+      done: true,
+      finishReason: toolCallAcc.size > 0 ? "tool_call" : gotContent ? "stop" : "length",
+      usage: { completionTokens: totalCompletionTokens },
+      toolCalls: collectToolCalls(),
+    };
   } finally {
     reader.releaseLock();
   }
@@ -440,32 +627,4 @@ function makeSyntheticContext(): ExecutionContext {
     },
     events: { emit() {}, on() { return () => {} }, clear() {} },
   };
-}
-
-/** Heuristic context window inference for models without /models/{id} metadata. */
-function inferContextWindow(modelId: string): number {
-  if (modelId.startsWith("gpt-4o")) return 128_000;
-  if (modelId.startsWith("gpt-4.1")) return 1_000_000;
-  if (modelId.startsWith("gpt-4-turbo")) return 128_000;
-  if (modelId.startsWith("gpt-4")) return 8192;
-  if (modelId.startsWith("gpt-3.5-turbo")) return 16_385;
-  if (modelId.startsWith("o1")) return 200_000;
-  if (modelId.startsWith("o3") || modelId.startsWith("o4")) return 200_000;
-  if (modelId.startsWith("text-embedding-3")) return 8191;
-  if (modelId.startsWith("text-embedding-ada")) return 8191;
-  return 8192;
-}
-
-/** Infer model family for metadata. */
-function inferModelFamily(modelId: string): string {
-  if (modelId.startsWith("gpt-4o")) return "gpt-4o";
-  if (modelId.startsWith("gpt-4.1")) return "gpt-4.1";
-  if (modelId.startsWith("gpt-4")) return "gpt-4";
-  if (modelId.startsWith("gpt-3.5")) return "gpt-3.5";
-  if (modelId.startsWith("o1") || modelId.startsWith("o3") || modelId.startsWith("o4")) return "reasoning";
-  if (modelId.startsWith("dall-e")) return "dall-e";
-  if (modelId.startsWith("text-embedding")) return "embeddings";
-  if (modelId.startsWith("whisper")) return "whisper";
-  if (modelId.startsWith("tts")) return "tts";
-  return "unknown";
 }

@@ -16,6 +16,7 @@ import { loadProvidersFromConfig } from "../providers/provider-loader.js";
 import type { IProvider, ProviderModel } from "../core/types.js";
 import { saveConfig, createEmptyConfig, type OnboardingConfig } from "../cli/onboarding-config.js";
 import { detectApiKeys, maskKey, type DetectedKey } from "../cli/key-detector.js";
+import { COLORS } from "./colors.js";
 
 // ---------------------------------------------------------------------------
 // Provider presets
@@ -258,13 +259,14 @@ export function OnboardingFlow({ onComplete }: { onComplete: (config: Onboarding
     ]);
 
     // Build provider entry — use customUrl if set (for custom providers).
+    // displayName = preset.id so provider.id matches config id.
     const baseUrl = customUrl.trim() || preset.baseUrl;
     const entry: ProviderEntry = {
       type: preset.type,
       apiKey: key || undefined,
       baseUrl: baseUrl,
       authMethod: preset.authMethod ?? (key ? "bearer" : "none"),
-      displayName: displayName,
+      displayName: preset.id,
       enabled: true,
     };
     const resolved = resolveProviderEntry(preset.id, entry);
@@ -326,76 +328,76 @@ export function OnboardingFlow({ onComplete }: { onComplete: (config: Onboarding
   }, []);
 
   // ---- Capabilities + Save ----
+  // Use a ref guard so this effect only runs ONCE.
+  const hasSavedRef = useRef(false);
   useEffect(() => {
     if (phase !== "capabilities" || !selectedPreset || !selectedModel) return;
+    if (hasSavedRef.current) return;
+    hasSavedRef.current = true;
 
-    // Auto-enable free deterministic tools + save config.
     const config = createEmptyConfig();
     config.primaryProvider = selectedPreset.id;
     config.primaryModel = selectedModel;
 
-    // Save the provider entry — use the actual baseUrl (customUrl or preset default).
     const actualBaseUrl = customUrl.trim() || selectedPreset.baseUrl;
+    const providerId = selectedPreset.id;
     const entry: ProviderEntry = {
       type: selectedPreset.type,
       apiKey: apiKey || undefined,
       baseUrl: actualBaseUrl,
       authMethod: selectedPreset.authMethod ?? (apiKey ? "bearer" : "none"),
-      displayName: selectedPreset.label,
+      displayName: providerId,
       enabled: true,
     };
-    config.providers[selectedPreset.id] = resolveProviderEntry(selectedPreset.id, entry);
+    config.providers[providerId] = resolveProviderEntry(providerId, entry);
 
-    // Auto-enable free deterministic tools.
     config.preferDeterministicTools = true;
     config.sandbox.allowedRoots = [process.cwd()];
     config.sandbox.allowedCommands = ["git", "node", "npm", "npx", "tsx"];
+    config.sandbox.allowNetwork = true; // Enable network for search, HTTP, browser tools
     config.onboarded = true;
 
-    // Save.
     setPhase("saving");
     saveConfig(config);
 
-    // Transition to terminal after a brief pause.
     const t = setTimeout(() => {
-      setPhase("done");
       onCompleteRef.current(config);
     }, 500);
 
     return () => clearTimeout(t);
-  }, [phase, selectedPreset, selectedModel, apiKey]);
+  }, [phase, selectedPreset, selectedModel, apiKey, customUrl]);
 
   // ---- Render ----
 
   if (phase === "welcome") {
     return (
       <Box flexDirection="column" alignItems="center" justifyContent="center" padding={2}>
-        <Text color="cyan" bold>
+        <Text color={COLORS.azure} bold>
           ██████╗██╗███╗   ███╗██╗   ██╗███████╗██╗  ██╗██╗██████╗ ███████╗██████╗
         </Text>
-        <Text color="cyan" bold>
+        <Text color={COLORS.azure} bold>
           ██╔════╝██║████╗ ████║██║   ██║██╔════╝██║  ██║██║██╔══██╗██╔════╝██╔══██╗
         </Text>
-        <Text color="cyan" bold>
+        <Text color={COLORS.azure} bold>
           ██║     ██║██╔████╔██║██║   ██║███████╗███████║██║██║  ██║█████╗  ██████╔╝
         </Text>
-        <Text color="cyan" bold>
+        <Text color={COLORS.azure} bold>
           ██║     ██║██║╚██╔╝██║██║   ██║╚════██║██╔══██║██║██║  ██║██╔══╝  ██╔══██╗
         </Text>
-        <Text color="cyan" bold>
+        <Text color={COLORS.azure} bold>
           ╚██████╗██║██║ ╚═╝██║╚██████╔╝███████║██║  ██║██║██████╔╝███████╗██║  ██║
         </Text>
-        <Text color="cyan" bold>
+        <Text color={COLORS.azure} bold>
           ╚═════╝╚═╝╚═╝     ╚═╝ ╚═════╝ ╚══════╝╚═╝  ╚═╝╚═╝╚═════╝ ╚══════╝╚═╝  ╚═╝
         </Text>
         <Box marginTop={1}>
-          <Text>One Runtime. Any Model. Unlimited Capabilities.</Text>
+          <Text color={COLORS.white}>One Runtime. Any Model. Unlimited Capabilities.</Text>
         </Box>
         <Box marginTop={2}>
-          <Text color="gray">Welcome to MINDIGENOUS. Let's get you set up.</Text>
+          <Text color={COLORS.dim}>Welcome to MINDIGENOUS. Let's get you set up.</Text>
         </Box>
         <Box marginTop={1}>
-          <Text color="cyan" bold>Press Enter to begin →</Text>
+          <Text color={COLORS.sky} bold>Press Enter to begin →</Text>
         </Box>
       </Box>
     );
@@ -404,13 +406,13 @@ export function OnboardingFlow({ onComplete }: { onComplete: (config: Onboarding
   if (phase === "scanning") {
     return (
       <Box flexDirection="column" alignItems="center" justifyContent="center" padding={2}>
-        <Text color="#3b82f6" bold>🔍 Scanning system for API keys...</Text>
+        <Text color={COLORS.azure} bold>🔍 Scanning system for API keys...</Text>
         <Box marginTop={1}>
-          <Text color="#1e3a5f">Checking environment variables</Text>
+          <Text color={COLORS.deep}>Checking environment variables</Text>
         </Box>
-        <Text color="#1e3a5f">Checking .env files</Text>
-        <Text color="#1e3a5f">Checking Claude Code config</Text>
-        <Text color="#1e3a5f">Checking project directories</Text>
+        <Text color={COLORS.deep}>Checking .env files</Text>
+        <Text color={COLORS.deep}>Checking Claude Code config</Text>
+        <Text color={COLORS.deep}>Checking project directories</Text>
       </Box>
     );
   }
@@ -418,32 +420,32 @@ export function OnboardingFlow({ onComplete }: { onComplete: (config: Onboarding
   if (phase === "key-select") {
     return (
       <Box flexDirection="column" padding={1}>
-        <Text bold color="#3b82f6">Found {detectedKeys.length} API key(s) on your system</Text>
-        <Text>Select a key to use, or skip to enter manually:</Text>
+        <Text bold color={COLORS.azure}>Found {detectedKeys.length} API key(s) on your system</Text>
+        <Text color={COLORS.white}>Select a key to use, or skip to enter manually:</Text>
         <Box marginTop={1} flexDirection="column">
           {detectedKeys.map((dk, i) => (
             <Box key={i} gap={1}>
-              <Text color={i === cursor ? "#60a5fa" : "#6b6b80"}>
+              <Text color={i === cursor ? COLORS.sky : COLORS.dim}>
                 {i === cursor ? "❯" : " "}
               </Text>
-              <Text color={i === cursor ? "#93c5fd" : "#ffffff"} bold={i === cursor}>
+              <Text color={i === cursor ? COLORS.ice : COLORS.white} bold={i === cursor}>
                 {dk.label}
               </Text>
-              <Text color="#6b6b80">{maskKey(dk.key)}</Text>
-              <Text color="#6b6b80">({dk.source})</Text>
+              <Text color={COLORS.dim}>{maskKey(dk.key)}</Text>
+              <Text color={COLORS.dim}>({dk.source})</Text>
             </Box>
           ))}
           <Box gap={1} marginTop={1}>
-            <Text color={cursor === detectedKeys.length ? "#60a5fa" : "#6b6b80"}>
+            <Text color={cursor === detectedKeys.length ? COLORS.sky : COLORS.dim}>
               {cursor === detectedKeys.length ? "❯" : " "}
             </Text>
-            <Text color={cursor === detectedKeys.length ? "#93c5fd" : "#6b6b80"}>
+            <Text color={cursor === detectedKeys.length ? COLORS.ice : COLORS.dim}>
               Skip — enter manually
             </Text>
           </Box>
         </Box>
         <Box marginTop={1}>
-          <Text color="#6b6b80">↑↓ Navigate · Enter Select</Text>
+          <Text color={COLORS.dim}>↑↓ Navigate · Enter Select</Text>
         </Box>
       </Box>
     );
@@ -452,25 +454,25 @@ export function OnboardingFlow({ onComplete }: { onComplete: (config: Onboarding
   if (phase === "provider-select") {
     return (
       <Box flexDirection="column" padding={1}>
-        <Text bold color="cyan">Select your AI provider</Text>
-        <Text>Choose the provider you want as your primary reasoning engine.</Text>
+        <Text bold color={COLORS.azure}>Select your AI provider</Text>
+        <Text color={COLORS.white}>Choose the provider you want as your primary reasoning engine.</Text>
         <Box marginTop={1} flexDirection="column">
           {PRESETS.map((preset, i) => (
             <Box key={preset.id} gap={1}>
-              <Text color={i === cursor ? "cyan" : "gray"}>
+              <Text color={i === cursor ? COLORS.sky : COLORS.dim}>
                 {i === cursor ? "❯" : " "}
               </Text>
-              <Text color={i === cursor ? "cyan" : "white"} bold={i === cursor}>
+              <Text color={i === cursor ? COLORS.sky : COLORS.white} bold={i === cursor}>
                 {preset.label.padEnd(20)}
               </Text>
-              <Text color="gray">
+              <Text color={COLORS.dim}>
                 {preset.description}
               </Text>
             </Box>
           ))}
         </Box>
         <Box marginTop={1}>
-          <Text>↑↓ Navigate · Enter Select · Ctrl+C Exit</Text>
+          <Text color={COLORS.dim}>↑↓ Navigate · Enter Select · Ctrl+C Exit</Text>
         </Box>
       </Box>
     );
@@ -480,10 +482,10 @@ export function OnboardingFlow({ onComplete }: { onComplete: (config: Onboarding
     const displayName = selectedPreset?.label ?? "Provider";
     return (
       <Box flexDirection="column" padding={1}>
-        <Text bold color="cyan">Enter your {displayName} API key</Text>
-        <Text>Your key is stored locally and never sent anywhere except {displayName}.</Text>
+        <Text bold color={COLORS.azure}>Enter your {displayName} API key</Text>
+        <Text color={COLORS.white}>Your key is stored locally and never sent anywhere except {displayName}.</Text>
         <Box marginTop={1}>
-          <Text color="cyan">{"› "}</Text>
+          <Text color={COLORS.sky}>{"› "}</Text>
           <TextInput
             value={apiKey}
             onChange={setApiKey}
@@ -492,7 +494,7 @@ export function OnboardingFlow({ onComplete }: { onComplete: (config: Onboarding
           />
         </Box>
         <Box marginTop={1}>
-          <Text>Press Enter when done · Ctrl+C Exit</Text>
+          <Text color={COLORS.dim}>Press Enter when done · Ctrl+C Exit</Text>
         </Box>
         {error && <Text color="red">✗ {error}</Text>}
       </Box>
@@ -503,10 +505,10 @@ export function OnboardingFlow({ onComplete }: { onComplete: (config: Onboarding
     const displayName = selectedPreset?.label ?? "Provider";
     return (
       <Box flexDirection="column" padding={1}>
-        <Text bold color="cyan">Configure {displayName}</Text>
-        <Text>Base URL (edit if needed, or press Enter to accept):</Text>
+        <Text bold color={COLORS.azure}>Configure {displayName}</Text>
+        <Text color={COLORS.white}>Base URL (edit if needed, or press Enter to accept):</Text>
         <Box marginTop={1}>
-          <Text color="cyan">{"› "}</Text>
+          <Text color={COLORS.sky}>{"› "}</Text>
           <TextInput
             value={customUrl}
             onChange={setCustomUrl}
@@ -514,7 +516,7 @@ export function OnboardingFlow({ onComplete }: { onComplete: (config: Onboarding
           />
         </Box>
         <Box marginTop={1}>
-          <Text>Press Enter to continue</Text>
+          <Text color={COLORS.dim}>Press Enter to continue</Text>
         </Box>
       </Box>
     );
@@ -524,24 +526,24 @@ export function OnboardingFlow({ onComplete }: { onComplete: (config: Onboarding
     const displayName = selectedPreset?.label ?? "Provider";
     return (
       <Box flexDirection="column" padding={1}>
-        <Text bold color="cyan">Setting up {displayName}</Text>
+        <Text bold color={COLORS.azure}>Setting up {displayName}</Text>
         <Box marginTop={1} flexDirection="column">
           {progress.map((step, i) => (
             <Box key={i} gap={1}>
-              <Text color={step.status === "done" ? "green" : step.status === "active" ? "cyan" : step.status === "failed" ? "red" : "gray"}>
+              <Text color={step.status === "done" ? COLORS.ice : step.status === "active" ? COLORS.sky : step.status === "failed" ? "red" : COLORS.dim}>
                 {step.status === "done" ? "✓" : step.status === "active" ? "◉" : step.status === "failed" ? "✗" : "○"}
               </Text>
-              <Text color={step.status === "done" ? "green" : step.status === "active" ? "white" : step.status === "failed" ? "red" : "gray"}>
+              <Text color={step.status === "done" ? COLORS.ice : step.status === "active" ? COLORS.white : step.status === "failed" ? "red" : COLORS.dim}>
                 {step.label}
               </Text>
-              {step.status === "active" && <Text color="cyan">...</Text>}
+              {step.status === "active" && <Text color={COLORS.sky}>...</Text>}
             </Box>
           ))}
         </Box>
         {error && (
           <Box marginTop={1} flexDirection="column">
             <Text color="red" bold>✗ {error}</Text>
-            <Text color="gray">Press any key to go back and try again.</Text>
+            <Text color={COLORS.dim}>Press any key to go back and try again.</Text>
           </Box>
         )}
       </Box>
@@ -554,14 +556,14 @@ export function OnboardingFlow({ onComplete }: { onComplete: (config: Onboarding
 
     return (
       <Box flexDirection="column" padding={1}>
-        <Text bold color="cyan">Select your primary model</Text>
-        <Text>Available models from {displayName}:</Text>
+        <Text bold color={COLORS.azure}>Select your primary model</Text>
+        <Text color={COLORS.white}>Available models from {displayName}:</Text>
         {models.length === 0 && (
           <Box marginTop={1} flexDirection="column">
-            <Text color="yellow">{displayName} doesn't expose a model list.</Text>
-            <Text>Type your model name (e.g. z-ai/glm-5.2-free):</Text>
+            <Text color={COLORS.frost}>{displayName} doesn't expose a model list.</Text>
+            <Text color={COLORS.white}>Type your model name (e.g. z-ai/glm-5.2-free):</Text>
             <Box marginTop={1}>
-              <Text color="cyan">{"› "}</Text>
+              <Text color={COLORS.sky}>{"› "}</Text>
               <TextInput
                 value={searchQuery}
                 onChange={setSearchQuery}
@@ -570,7 +572,7 @@ export function OnboardingFlow({ onComplete }: { onComplete: (config: Onboarding
             </Box>
             {searchQuery && (
               <Box marginTop={1}>
-                <Text color="cyan" bold>Press Enter to use "{searchQuery}"</Text>
+                <Text color={COLORS.sky} bold>Press Enter to use "{searchQuery}"</Text>
               </Box>
             )}
           </Box>
@@ -578,7 +580,7 @@ export function OnboardingFlow({ onComplete }: { onComplete: (config: Onboarding
         {filtered.length > 0 && (
           <Box marginTop={1} flexDirection="column">
             <Box marginBottom={1}>
-              <Text color="cyan">{"› "}</Text>
+              <Text color={COLORS.sky}>{"› "}</Text>
               <TextInput
                 value={searchQuery}
                 onChange={setSearchQuery}
@@ -587,21 +589,21 @@ export function OnboardingFlow({ onComplete }: { onComplete: (config: Onboarding
             </Box>
             {filtered.slice(0, 12).map((model, i) => (
               <Box key={model.id} gap={1}>
-                <Text color={i === cursor ? "cyan" : "gray"}>
+                <Text color={i === cursor ? COLORS.sky : COLORS.dim}>
                   {i === cursor ? "❯" : " "}
                 </Text>
-                <Text color={i === cursor ? "cyan" : "white"} bold={i === cursor}>
+                <Text color={i === cursor ? COLORS.sky : COLORS.white} bold={i === cursor}>
                   {model.id}
                 </Text>
                 {model.capabilities.length > 0 && (
-                  <Text color="gray">[{model.capabilities.join(", ")}]</Text>
+                  <Text color={COLORS.dim}>[{model.capabilities.join(", ")}]</Text>
                 )}
               </Box>
             ))}
           </Box>
         )}
         <Box marginTop={1}>
-          <Text>↑↓ Navigate · Type to search · Enter Select · Esc Clear</Text>
+          <Text color={COLORS.dim}>↑↓ Navigate · Type to search · Enter Select · Esc Clear</Text>
         </Box>
       </Box>
     );
@@ -610,16 +612,19 @@ export function OnboardingFlow({ onComplete }: { onComplete: (config: Onboarding
   if (phase === "capabilities" || phase === "saving") {
     return (
       <Box flexDirection="column" padding={1}>
-        <Text bold color="cyan">Configuring runtime...</Text>
-        <Text>Enabling deterministic tools (Filesystem, Terminal, Git, etc.)</Text>
-        <Text color="green" bold>✓ Free tools auto-enabled</Text>
-        <Text>Saving configuration...</Text>
-        <Text color="green" bold>✓ Configuration saved</Text>
+        <Text bold color={COLORS.azure}>Configuring runtime...</Text>
+        <Text color={COLORS.white}>Enabling deterministic tools (Filesystem, Terminal, Git, etc.)</Text>
+        <Text color={COLORS.ice} bold>✓ Free tools auto-enabled</Text>
+        <Text color={COLORS.white}>Saving configuration...</Text>
+        <Text color={COLORS.ice} bold>✓ Configuration saved</Text>
+        <Box marginTop={1}>
+          <Text color={COLORS.dim}>Starting MINDIGENOUS...</Text>
+        </Box>
       </Box>
     );
   }
 
-  return <Text>Starting...</Text>;
+  return <Text color={COLORS.azure}>Starting...</Text>;
 }
 
 // ---------------------------------------------------------------------------

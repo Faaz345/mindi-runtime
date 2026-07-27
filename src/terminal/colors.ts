@@ -56,13 +56,16 @@ export const COLORS = {
   active: BLUE.sky,
 
   // Code syntax
-  codeKeyword: BLUE.ice,
-  codeString: BLUE.sky,
-  codeComment: BLUE.deep,
-  codeNumber: BLUE.frost,
-  codeType: BLUE.azure,
-  codeDefault: BLUE.white,
-  codeLang: BLUE.deep,
+  // VS Code Dark+ token colors.
+  codeKeyword: "#c586c0",
+  codeString: "#ce9178",
+  codeComment: "#6a9955",
+  codeNumber: "#b5cea8",
+  codeType: "#4ec9b0",
+  codeFunction: "#dcdcaa",
+  codeDefault: "#d4d4d4",
+  codeLang: "#569cd6",
+  codeLineNumber: "#858585",
 
   // Status
   thinking: BLUE.azure,
@@ -78,4 +81,8 @@ export const COLORS = {
 
   // Links
   link: BLUE.sky,
+
+  // User prompt echo — light background band (Claude Code style)
+  promptBg: "#dbe4f0",      // Light bluish-white band behind the user's prompt
+  promptText: "#0a1628",    // Deep navy text on the light band
 } as const;

@@ -20,19 +20,27 @@ import { StartupAnimation } from "./StartupAnimation.js";
 import { BootSequence } from "./BootSequence.js";
 import { Terminal } from "./Terminal.js";
 import { OnboardingFlow } from "./OnboardingFlow.js";
-import { WorkspaceTrust } from "./WorkspaceTrust.js";
+import { WorkspaceTrust, trustWorkspace } from "./WorkspaceTrust.js";
+import { SessionPicker, resumableSessions } from "./SessionPicker.js";
 import { silentHealthCheck } from "../cli/health-check.js";
 import { loadEnvFile, bootRuntime } from "../cli/runtime-loader.js";
 import { toRuntimeConfig } from "../cli/onboarding-config.js";
+import { COLORS } from "./colors.js";
 import type { Runtime } from "../index.js";
 import type { OnboardingConfig } from "../cli/onboarding-config.js";
+import { messageFromChat, type Message } from "./types.js";
+import type { SessionSummary } from "../workspace/types.js";
 
-type Phase = "fade-in" | "health-check" | "onboarding" | "workspace-trust" | "startup" | "boot" | "terminal" | "error";
+type Phase = "fade-in" | "health-check" | "onboarding" | "workspace-trust" | "startup" | "boot" | "session-select" | "terminal" | "error";
 
 function App(): React.ReactElement {
   const [phase, setPhase] = useState<Phase>("fade-in");
   const [runtime, setRuntime] = useState<Runtime | null>(null);
   const [sessionId, setSessionId] = useState<string>("");
+  const [providerId, setProviderId] = useState<string>("");
+  const [modelId, setModelId] = useState<string>("");
+  const [restoredMessages, setRestoredMessages] = useState<Message[]>([]);
+  const [recentSessions, setRecentSessions] = useState<SessionSummary[]>([]);
   const [fadeStep, setFadeStep] = useState(0);
 
   // ---- Phase 0: Cool fade-in effect ----
@@ -65,21 +73,12 @@ function App(): React.ReactElement {
   useEffect(() => {
     if (phase !== "health-check") return;
     loadEnvFile();
-    silentHealthCheck().then((result) => {
+    silentHealthCheck().then(async (result) => {
       if (result.ok && result.config) {
         try {
           const rt = bootRuntime(toRuntimeConfig(result.config));
           setRuntime(rt);
-          const sessions = rt.sessions.list();
-          if (sessions.length > 0) {
-            setSessionId(sessions[0]!.id);
-          } else {
-            const s = rt.createSession({
-              providerId: rt.config.defaultProviderId,
-              modelId: rt.config.defaultModel,
-            });
-            setSessionId(s.id);
-          }
+           setRecentSessions(resumableSessions(rt.workspace?.sessionManager.listSessions() ?? []));
           setPhase("workspace-trust");
         } catch {
           setPhase("onboarding");
@@ -92,34 +91,74 @@ function App(): React.ReactElement {
 
   // ---- Phase 4: Onboarding complete ----
   const handleOnboardingComplete = useCallback((config: OnboardingConfig) => {
-    try {
+    // The user just explicitly configured MINDIGENOUS in this directory —
+    // trust it implicitly and go straight to the startup animation instead
+    // of showing a second, redundant trust prompt (which looked like a hang).
+    const boot = async (): Promise<Runtime> => {
       loadEnvFile();
       const rt = bootRuntime(toRuntimeConfig(config));
       setRuntime(rt);
-      const s = rt.createSession({
-        providerId: rt.config.defaultProviderId,
-        modelId: rt.config.defaultModel,
-      });
-      setSessionId(s.id);
-      setPhase("workspace-trust");
+      setRecentSessions(resumableSessions(rt.workspace?.sessionManager.listSessions() ?? []));
+      trustWorkspace(process.cwd());
+      setPhase("startup");
+      return rt;
+    };
+
+    try {
+      void boot();
     } catch (err) {
+      const errMsg = err instanceof Error ? err.message : String(err);
+      console.error("[MINDI] Onboarding boot error:", errMsg);
+      // Retry once after a short delay (config may need a beat to settle).
       setTimeout(() => {
-        try {
-          loadEnvFile();
-          const rt = bootRuntime(toRuntimeConfig(config));
-          setRuntime(rt);
-          const s = rt.createSession({
-            providerId: rt.config.defaultProviderId,
-            modelId: rt.config.defaultModel,
-          });
-          setSessionId(s.id);
-          setPhase("workspace-trust");
-        } catch {
+        boot().catch((err2) => {
+          const errMsg2 = err2 instanceof Error ? err2.message : String(err2);
+          console.error("[MINDI] Onboarding boot retry error:", errMsg2);
           setPhase("error");
-        }
+        });
       }, 500);
     }
   }, []);
+
+  const resumeSession = useCallback(async (id: string) => {
+    if (!runtime) return;
+    const restored = await runtime.activateWorkspaceSession(id);
+    if (!restored) return;
+    setSessionId(restored.session.id);
+    setProviderId(restored.effectiveProviderId);
+    setModelId(restored.effectiveModelId);
+    const history = runtime.workspace?.sessionManager.recall(id) ?? restored.session.messages;
+    setRestoredMessages(history.map(messageFromChat));
+    setPhase("terminal");
+  }, [runtime]);
+
+  const startNewSession = useCallback(async () => {
+    if (!runtime) return;
+    const record = runtime.workspace?.sessionManager.create({
+      providerId: runtime.config.defaultProviderId,
+      modelId: runtime.config.defaultModel,
+    });
+    if (record) {
+      const restored = await runtime.activateWorkspaceSession(record.id);
+      if (!restored) return;
+      setSessionId(record.id);
+      setProviderId(restored.effectiveProviderId);
+      setModelId(restored.effectiveModelId);
+    } else {
+      const session = runtime.createSession({ providerId: runtime.config.defaultProviderId, modelId: runtime.config.defaultModel });
+      setSessionId(session.id);
+      setProviderId(runtime.config.defaultProviderId);
+      setModelId(runtime.config.defaultModel);
+    }
+    setRestoredMessages([]);
+    setPhase("terminal");
+  }, [runtime]);
+
+  const deleteSession = useCallback((id: string) => {
+    if (!runtime?.workspace) return;
+    runtime.workspace.sessionManager.delete(id);
+    setRecentSessions(resumableSessions(runtime.workspace.sessionManager.listSessions()));
+  }, [runtime]);
 
   // ---- Render ----
 
@@ -127,7 +166,7 @@ function App(): React.ReactElement {
     const dots = "·".repeat(fadeStep * 2);
     return (
       <Box flexDirection="column" alignItems="center" justifyContent="center">
-        <Text color="#1e3a5f">{dots}</Text>
+        <Text color={COLORS.deep}>{dots}</Text>
       </Box>
     );
   }
@@ -135,7 +174,7 @@ function App(): React.ReactElement {
   if (phase === "health-check") {
     return (
       <Box flexDirection="column" alignItems="center" justifyContent="center">
-        <Text color="#3b82f6">Initializing MINDIGENOUS Runtime...</Text>
+        <Text color={COLORS.azure}>Initializing MINDIGENOUS Runtime...</Text>
       </Box>
     );
   }
@@ -153,7 +192,14 @@ function App(): React.ReactElement {
   }
 
   if (phase === "boot") {
-    return <BootSequence onDone={() => setPhase("terminal")} />;
+    return <BootSequence onDone={() => {
+      if (recentSessions.length > 0) setPhase("session-select");
+      else void startNewSession();
+    }} />;
+  }
+
+  if (phase === "session-select") {
+    return <SessionPicker sessions={recentSessions} onResume={(id) => void resumeSession(id)} onNew={() => void startNewSession()} onDelete={deleteSession} />;
   }
 
   if (phase === "terminal" && runtime) {
@@ -161,9 +207,20 @@ function App(): React.ReactElement {
       <Terminal
         runtime={runtime}
         sessionId={sessionId}
-        providerId={runtime.config.defaultProviderId}
-        modelId={runtime.config.defaultModel}
+        providerId={providerId || runtime.config.defaultProviderId}
+        modelId={modelId || runtime.config.defaultModel}
         workspace={process.cwd()}
+        restoredMessages={restoredMessages}
+         onSwitchSession={(id) => {
+           setSessionId(id);
+           const record = runtime.workspace?.sessionManager.get(id);
+           if (record) {
+             setProviderId(record.providerId);
+             setModelId(record.modelId);
+           }
+           const history = runtime.workspace?.sessionManager.recall(id) ?? [];
+           setRestoredMessages(history.map(messageFromChat));
+        }}
       />
     );
   }
@@ -172,7 +229,7 @@ function App(): React.ReactElement {
     return (
       <Box flexDirection="column" padding={2}>
         <Text color="red" bold>✗ Failed to start MINDIGENOUS</Text>
-        <Text color="gray">Please check your configuration and try again.</Text>
+        <Text color={COLORS.dim}>Please check your configuration and try again.</Text>
       </Box>
     );
   }

@@ -49,6 +49,7 @@ export {
   ToolError,
   SessionError,
   RequestError,
+  WorkspaceError,
   isMindiError,
   toMindiError,
 } from "./core/errors.js";
@@ -56,7 +57,7 @@ export type { ErrorCode } from "./core/errors.js";
 
 // Config
 export { resolveConfig, configFromEnv } from "./core/config.js";
-export type { RuntimeConfig, SandboxConfig, ResolvedConfig } from "./core/config.js";
+export type { RuntimeConfig, SandboxConfig, ResolvedConfig, WorkspaceConfig, ResolvedWorkspaceConfig } from "./core/config.js";
 
 // Streaming
 export type { StreamEvent } from "./streaming/StreamingEngine.js";
@@ -125,8 +126,25 @@ export { resolveProviderEntry, providersFromEnv, PROVIDER_DEFAULTS, DEFAULT_RETR
 // Pipeline stages
 export { IntentAnalyzer } from "./intent/IntentAnalyzer.js";
 export { CapabilityPlanner } from "./planner/CapabilityPlanner.js";
+export { TaskPlanner } from "./planner/TaskPlanner.js";
+export type { TaskPlan, TaskType, TaskSignals } from "./planner/TaskPlanner.js";
 export { CapabilityRouter } from "./router/CapabilityRouter.js";
 export { ContextBuilder, humanLabel } from "./context/ContextBuilder.js";
+
+// Agent orchestration — the autonomous execution loop
+export { AgentOrchestrator } from "./agent/AgentOrchestrator.js";
+export type { AgentRunOptions, AgentRunResult } from "./agent/AgentOrchestrator.js";
+export {
+  AGENT_TOOLS,
+  ToolCallStreamFilter,
+  parseToolCalls,
+  toolCallToCapability,
+  buildAgentSystemPrompt,
+  formatToolResultMessage,
+} from "./agent/toolProtocol.js";
+export type { AgentToolDef, ToolCall } from "./agent/toolProtocol.js";
+export { extractCodeBlocks, pickTargetPath, writeArtifact } from "./agent/artifactRescue.js";
+export type { RescuedArtifact, CodeBlock } from "./agent/artifactRescue.js";
 
 // Execution graph
 export { GraphBuilder, topologicalWaves, graphToString } from "./planner/ExecutionGraph.js";
@@ -151,6 +169,59 @@ export { MemoryLayer, InMemoryMemoryStore } from "./memory/MemoryLayer.js";
 export type { MemoryStore } from "./memory/MemoryLayer.js";
 export { SessionManager } from "./session/SessionManager.js";
 export type { Session, SessionInit } from "./session/SessionManager.js";
+
+// Capability system — model-centric capability detection + registry
+export { ModelCapabilityRegistry } from "./capability/ModelCapabilityRegistry.js";
+export { CapabilityCache } from "./capability/CapabilityCache.js";
+export {
+  buildProfile,
+  profileFromDeclaration,
+  profileToCapabilityTypes,
+  profileKey,
+  describeSource,
+  normalizeOpenAIModelMetadata,
+  normalizeGeminiModelMetadata,
+} from "./capability/CapabilityDetector.js";
+export type {
+  ModelCapabilityProfile,
+  RawModelMetadata,
+  MetadataSource,
+  RefreshReport,
+} from "./capability/types.js";
+
+// Workspace — persistent per-directory session system (.mindi/)
+export { WorkspaceStore } from "./workspace/WorkspaceStore.js";
+export { FileMemoryStore } from "./workspace/FileMemoryStore.js";
+export { ProjectMemoryManager } from "./workspace/ProjectMemory.js";
+export { ContextCompressor } from "./workspace/ContextCompressor.js";
+export { SessionSearch } from "./workspace/SessionSearch.js";
+export { WorkspaceSessionManager } from "./workspace/WorkspaceSessionManager.js";
+export type { AvailabilityProbe, RestoreResult } from "./workspace/WorkspaceSessionManager.js";
+export { SlashCommandRegistry } from "./workspace/SlashCommands.js";
+export type { RuntimeCommandBridge } from "./workspace/SlashCommands.js";
+export type {
+  WorkspaceMeta,
+  WorkspaceSettings,
+  SessionSummary,
+  SessionRecord,
+  SessionSummary2,
+  ExecutionEvent,
+  SessionAttachment,
+  SessionUsage,
+  ProjectMemory,
+  TechStackEntry,
+  ArchitecturalDecision,
+  ConventionEntry,
+  ImportantFile,
+  FrequentCommand,
+  SummaryStore,
+  SearchQuery,
+  SessionSearchResult,
+  SlashCommand,
+  SlashCommandContext,
+  SlashCommandResult,
+} from "./workspace/types.js";
+export { makeAvailabilityProbe, type WorkspaceSystem } from "./runtime/Runtime.js";
 
 // Terminal input (reusable in terminal + desktop)
 export { InputController } from "./terminal/input/InputController.js";

@@ -12,6 +12,9 @@
  */
 
 import { describe, it, expect, beforeEach } from "vitest";
+import fs from "node:fs";
+import path from "node:path";
+import os from "node:os";
 import { Runtime } from "../src/runtime/Runtime.js";
 import { CapabilityType } from "../src/core/types.js";
 import type {
@@ -259,6 +262,30 @@ describe("Integration: Capability Negotiation & Augmentation", () => {
       expect(res.error).toBeUndefined();
     });
 
+    it("passes a quoted local image path to the augmentation provider as image data", async () => {
+      let receivedImage = "";
+      class CapturingVisionProvider extends MockProvider {
+        constructor() { super("openai", "OpenAI Vision", [CapabilityType.Chat, CapabilityType.Vision]); }
+        override async executeCapability(type: CapabilityType, input: CapabilityInput, ctx: ExecutionContext): Promise<CapabilityResult> {
+          if (type === CapabilityType.Vision) receivedImage = String(input.params.image ?? "");
+          return super.executeCapability(type, input, ctx);
+        }
+      }
+      rt = new Runtime({ providers: {}, sandbox: { allowedRoots: [process.cwd()] } });
+      rt.registerProvider(new MockProvider("glm", "GLM Chat", [CapabilityType.Chat]));
+      rt.registerProvider(new CapturingVisionProvider());
+      const imgPath = path.join(process.cwd(), "tests", "vision-fixture.png");
+      fs.writeFileSync(imgPath, Buffer.from("89504e470d0a1a0a", "hex"));
+      try {
+        const s = rt.createSession({ providerId: "glm", modelId: "mock-model" });
+        const res = await rt.requestOnce({ sessionId: s.id, text: `"${imgPath}" what is in this image?` });
+        expect(res.error).toBeUndefined();
+        expect(receivedImage.startsWith("data:image/png;base64,")).toBe(true);
+      } finally {
+        fs.rmSync(imgPath, { force: true });
+      }
+    });
+
     it("does not augment when the primary model already has vision", async () => {
       const s = rt.createSession({ providerId: "openai", modelId: "mock-model" });
       const res = await rt.requestOnce({
@@ -439,6 +466,103 @@ describe("Integration: Capability Negotiation & Augmentation", () => {
       // Should NOT throw — degrades gracefully.
       expect(res.error).toBeUndefined();
       expect(res.text.length).toBeGreaterThan(0);
+    });
+  });
+
+  describe("Native vision — image is embedded inline (no hallucination)", () => {
+    it("embeds a quoted image path with spaces as multimodal content for a vision-native model", async () => {
+      // Capture the exact chat request the provider receives.
+      let captured: ChatRequest | null = null;
+      class VisionProvider extends MockProvider {
+        constructor() { super("visionprov", "VisionProv", [CapabilityType.Chat, CapabilityType.Vision]); }
+        override async *chat(request: ChatRequest, ctx: ExecutionContext): AsyncIterable<ChatChunk> {
+          captured = request;
+          yield* super.chat(request, ctx);
+        }
+      }
+
+      // Write a tiny real PNG to a temp path that contains a SPACE.
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "mindi vision test "));
+      const imgPath = path.join(tmpDir, "my screenshot.png");
+      fs.writeFileSync(imgPath, Buffer.from("89504e470d0a1a0a", "hex"));
+
+      try {
+        const rt = new Runtime({ providers: {}, sandbox: { allowedRoots: [tmpDir] } });
+        rt.registerProvider(new VisionProvider());
+        const s = rt.createSession({ providerId: "visionprov", modelId: "mock-model" });
+
+        await rt.requestOnce({ sessionId: s.id, text: `"${imgPath}"` });
+
+        expect(captured).not.toBeNull();
+        const userMsg = captured!.messages.filter((m) => m.role === "user").pop();
+        expect(userMsg).toBeDefined();
+        // The content must be multimodal (array with an image part), not bare text.
+        expect(Array.isArray(userMsg!.content)).toBe(true);
+        const parts = userMsg!.content as Array<{ type: string }>;
+        const hasImage = parts.some((p) => p.type === "image" || p.type === "image_url");
+        expect(hasImage).toBe(true);
+      } finally {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
+    });
+
+    it("surfaces a readable warning when the image file does not exist", async () => {
+      let captured: ChatRequest | null = null;
+      class VisionProvider extends MockProvider {
+        constructor() { super("visionprov", "VisionProv", [CapabilityType.Chat, CapabilityType.Vision]); }
+        override async *chat(request: ChatRequest, ctx: ExecutionContext): AsyncIterable<ChatChunk> {
+          captured = request;
+          yield* super.chat(request, ctx);
+        }
+      }
+
+      const rt = new Runtime({ providers: {} });
+      rt.registerProvider(new VisionProvider());
+      const s = rt.createSession({ providerId: "visionprov", modelId: "mock-model" });
+
+      const missing = "C:\\definitely\\does\\not\\exist\\nope.png";
+      await rt.requestOnce({ sessionId: s.id, text: `${missing} whats in this image?` });
+
+      expect(captured).not.toBeNull();
+      const userMsg = captured!.messages.filter((m) => m.role === "user").pop();
+      expect(userMsg).toBeDefined();
+      // No image embedded (file missing) — but a warning must be present so
+      // the model tells the user instead of hallucinating.
+      const text = typeof userMsg!.content === "string"
+        ? userMsg!.content
+        : (userMsg!.content as Array<{ type: string; text?: string }>).map((p) => p.text ?? "").join(" ");
+      expect(text).toContain("could not be read");
+      expect(text).toContain("nope.png");
+    });
+
+    it("embeds an explicitly pasted image path outside the workspace root", async () => {
+      let captured: ChatRequest | null = null;
+      class VisionProvider extends MockProvider {
+        constructor() { super("visionprov", "VisionProv", [CapabilityType.Chat, CapabilityType.Vision]); }
+        override async *chat(request: ChatRequest, ctx: ExecutionContext): AsyncIterable<ChatChunk> {
+          captured = request;
+          yield* super.chat(request, ctx);
+        }
+      }
+
+      const allowedDir = fs.mkdtempSync(path.join(os.tmpdir(), "mindi allowed "));
+      const outsideDir = fs.mkdtempSync(path.join(os.tmpdir(), "mindi outside "));
+      const imgPath = path.join(outsideDir, "secret.png");
+      fs.writeFileSync(imgPath, Buffer.from("89504e470d0a1a0a", "hex"));
+
+      try {
+        const rt = new Runtime({ providers: {}, sandbox: { allowedRoots: [allowedDir] } });
+        rt.registerProvider(new VisionProvider());
+        const s = rt.createSession({ providerId: "visionprov", modelId: "mock-model" });
+        await rt.requestOnce({ sessionId: s.id, text: `"${imgPath}"` });
+
+        const userMsg = captured!.messages.filter((m) => m.role === "user").pop();
+        expect(Array.isArray(userMsg!.content)).toBe(true);
+        expect((userMsg!.content as Array<{ type: string }>).some((part) => part.type === "image" || part.type === "image_url")).toBe(true);
+      } finally {
+        fs.rmSync(allowedDir, { recursive: true, force: true });
+        fs.rmSync(outsideDir, { recursive: true, force: true });
+      }
     });
   });
 });

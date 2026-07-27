@@ -25,6 +25,13 @@ export type StreamEvent =
   | { type: "intent"; summary: string; capabilities: string[]; confidence: number }
   | { type: "plan"; satisfied: string[]; missing: string[]; unavailable: Array<{ type: string; reason: string }> }
   | { type: "capability"; capabilityType: string; source: string; ok: boolean; durationMs: number; preview: string }
+  | { type: "attachment"; kind: "image"; count: number; sizeBytes: number }
+  // Agentic lifecycle events (emitted by the AgentOrchestrator)
+  | { type: "task"; taskType: string; chain: string[]; reasoning: string }
+  | { type: "tool"; phase: "selected" | "started" | "finished"; name: string; ok?: boolean; durationMs?: number; preview?: string }
+  | { type: "file"; path: string; bytes: number; verified: boolean }
+  | { type: "reflection"; note: string; iteration: number }
+  | { type: "goal"; status: "completed" | "failed"; reason: string }
   | { type: "delta"; text: string }
   | { type: "done"; finishReason?: string; usage?: { promptTokens?: number; completionTokens?: number; totalTokens?: number } }
   | { type: "error"; code: string; message: string };

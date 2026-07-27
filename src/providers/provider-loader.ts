@@ -50,8 +50,6 @@ function instantiateProvider(id: string, entry: ProviderEntry): IProvider | null
   switch (entry.type) {
     case "openai-compatible":
       // Use TokenRouterProvider for tokenrouter id, OpenAIProvider for others.
-      // Both are OpenAI-compatible; TokenRouter is the reference impl with
-      // opaque model names. For everything else, OpenAIProvider works.
       if (id === "tokenrouter") {
         return new TokenRouterProvider({
           apiKey: entry.apiKey!,
@@ -67,6 +65,8 @@ function instantiateProvider(id: string, entry: ProviderEntry): IProvider | null
         baseUrl: entry.baseUrl,
         orgId: entry.orgId,
         models: entry.models,
+        displayName: entry.displayName ?? id,
+        requireParameters: entry.requireParameters,
       });
 
     case "gemini":

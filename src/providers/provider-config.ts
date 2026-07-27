@@ -60,6 +60,14 @@ export interface ProviderEntry {
   retryPolicy?: ProviderRetryPolicy;
   /** Declared capabilities (if not auto-detectable). */
   capabilities?: CapabilityType[];
+  /**
+   * OpenRouter-style strict routing: send `provider.require_parameters=true`
+   * so requests only route to upstreams that accept EVERY parameter in the
+   * request (including image content parts). Prevents silent image dropping
+   * on routes that can't handle multimodal input. Defaults to true on
+   * openrouter.ai, off elsewhere.
+   */
+  requireParameters?: boolean;
   /** Model overrides (capability/contextWindow per model). */
   models?: Record<string, { capabilities: CapabilityType[]; contextWindow?: number }>;
   /** Provider-specific metadata. */
@@ -120,6 +128,7 @@ export function resolveProviderEntry(id: string, entry: ProviderEntry): Provider
     timeoutMs: entry.timeoutMs ?? 60_000,
     retryPolicy: entry.retryPolicy ?? DEFAULT_RETRY_POLICY,
     capabilities: entry.capabilities,
+    requireParameters: entry.requireParameters,
     models: entry.models,
     metadata: { ...defaults.metadata, ...entry.metadata },
     enabled: entry.enabled ?? true,

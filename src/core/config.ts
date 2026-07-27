@@ -22,6 +22,26 @@ export interface RuntimeConfig {
   providers?: ProvidersConfig;
   /** Sandbox policy applied to all tools */
   sandbox?: SandboxConfig;
+  /**
+   * Workspace persistence. When enabled, MINDI maintains a `.mindi` folder
+   * in the workspace root with sessions, project memory, and summaries —
+   * giving Claude Code / Cursor-style auto-restore across launches.
+   */
+  workspace?: WorkspaceConfig;
+}
+
+/** Configuration for the persistent workspace session system. */
+export interface WorkspaceConfig {
+  /** Enable the workspace system (default: true when a rootDir is provided). */
+  enabled?: boolean;
+  /** Absolute path of the project directory. Defaults to process.cwd(). */
+  rootDir?: string;
+  /** Auto-restore the last active session on launch (default true). */
+  autoRestore?: boolean;
+  /** Auto-save after every response (default true). */
+  autoSave?: boolean;
+  /** Max verbatim messages before compression folds older ones into a summary. */
+  maxHistoryMessages?: number;
 }
 
 export type { ProvidersConfig, ProviderEntry };
@@ -43,6 +63,15 @@ export interface ResolvedConfig {
   maxHistoryMessages: number;
   providers: ProvidersConfig;
   sandbox: Required<SandboxConfig>;
+  workspace: ResolvedWorkspaceConfig;
+}
+
+export interface ResolvedWorkspaceConfig {
+  enabled: boolean;
+  rootDir: string;
+  autoRestore: boolean;
+  autoSave: boolean;
+  maxHistoryMessages: number;
 }
 
 const DEFAULTS = {
@@ -59,6 +88,13 @@ const DEFAULTS = {
     timeoutMs: 30_000,
     maxOutputBytes: 1_048_576, // 1 MiB
   },
+  workspace: {
+    enabled: false,
+    rootDir: process.cwd(),
+    autoRestore: true,
+    autoSave: true,
+    maxHistoryMessages: 50,
+  },
 };
 
 /** Merge user config over defaults. */
@@ -68,6 +104,7 @@ export function resolveConfig(user?: RuntimeConfig): ResolvedConfig {
       ...DEFAULTS,
       providers: {},
       sandbox: { ...DEFAULTS.sandbox },
+      workspace: { ...DEFAULTS.workspace },
     };
   }
   return {
@@ -84,6 +121,13 @@ export function resolveConfig(user?: RuntimeConfig): ResolvedConfig {
       allowNetwork: user.sandbox?.allowNetwork ?? DEFAULTS.sandbox.allowNetwork,
       timeoutMs: user.sandbox?.timeoutMs ?? DEFAULTS.sandbox.timeoutMs,
       maxOutputBytes: user.sandbox?.maxOutputBytes ?? DEFAULTS.sandbox.maxOutputBytes,
+    },
+    workspace: {
+      enabled: user.workspace?.enabled ?? DEFAULTS.workspace.enabled,
+      rootDir: user.workspace?.rootDir ?? DEFAULTS.workspace.rootDir,
+      autoRestore: user.workspace?.autoRestore ?? DEFAULTS.workspace.autoRestore,
+      autoSave: user.workspace?.autoSave ?? DEFAULTS.workspace.autoSave,
+      maxHistoryMessages: user.workspace?.maxHistoryMessages ?? DEFAULTS.workspace.maxHistoryMessages,
     },
   };
 }

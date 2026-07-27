@@ -78,4 +78,30 @@ describe("SessionManager", () => {
     expect(() => sm.get(s.id)).toThrow(SessionError);
     expect(await sm.recall(s.id)).toEqual([]);
   });
+
+  it("restore seeds a session with a known id and prior history", async () => {
+    const sm = new SessionManager();
+    const s = sm.restore(
+      "ws-session-1",
+      { providerId: "custom", modelId: "gemma-4-31b-it" },
+      [
+        { role: "user", content: "earlier question" },
+        { role: "assistant", content: "earlier answer" },
+      ],
+    );
+    expect(s.id).toBe("ws-session-1");
+    expect(s.providerId).toBe("custom");
+    expect(s.modelId).toBe("gemma-4-31b-it");
+    const hist = await sm.recall(s.id);
+    expect(hist.map((m) => m.content)).toContain("earlier question");
+    expect(hist.map((m) => m.content)).toContain("earlier answer");
+  });
+
+  it("restore is idempotent — returns the existing session unchanged", async () => {
+    const sm = new SessionManager();
+    const first = sm.restore("s1", { providerId: "a", modelId: "m1" }, [{ role: "user", content: "x" }]);
+    const second = sm.restore("s1", { providerId: "b", modelId: "m2" }, []);
+    expect(second).toBe(first);
+    expect(second.providerId).toBe("a"); // unchanged
+  });
 });

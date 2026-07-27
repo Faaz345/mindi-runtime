@@ -139,4 +139,57 @@ describe("CapabilityPlanner", () => {
     );
     expect(plan.satisfied).toContain(CapabilityType.Vision);
   });
+
+  describe("filesystem pre-execution (fix: models told they have tools they can't invoke)", () => {
+    function planFs(input: string) {
+      const r = new CapabilityRegistry();
+      r.register({
+        id: "tool.fs",
+        type: CapabilityType.Filesystem,
+        source: "tool",
+        label: "FS",
+        priority: 1000,
+        execute: async () => ({ type: CapabilityType.Filesystem, source: "tool.fs", ok: true, payload: { kind: "text", text: "" }, durationMs: 0 }),
+        canHandle: () => true,
+      });
+      const p = new CapabilityPlanner(r);
+      const provider = fakeProvider([CapabilityType.Chat]);
+      return p.plan(
+        fakeIntent([CapabilityType.Chat, CapabilityType.Filesystem]),
+        provider,
+        "fake-model",
+        { requestId: "r", sessionId: "s", messages: [], input },
+      );
+    }
+
+    it("pre-executes fs.read for a bare filename mention", async () => {
+      const plan = await planFs("what's in package.json?");
+      expect(plan.missing[0]!.input.params).toEqual({ op: "read", path: "package.json" });
+    });
+
+    it("pre-executes fs.read for a quoted path with spaces", async () => {
+      const plan = await planFs(`summarize "C:\\Users\\me\\My Documents\\notes.md" please`);
+      expect(plan.missing[0]!.input.params).toEqual({ op: "read", path: "C:\\Users\\me\\My Documents\\notes.md" });
+    });
+
+    it("pre-executes fs.read for a relative path", async () => {
+      const plan = await planFs("read src\\index.ts and explain it");
+      expect(plan.missing[0]!.input.params).toEqual({ op: "read", path: "src\\index.ts" });
+    });
+
+    it("uses list (not read) for directory-looking targets", async () => {
+      const plan = await planFs("what files are in C:\\projects\\mindi-runtime");
+      expect(plan.missing[0]!.input.params).toEqual({ op: "list", path: "C:\\projects\\mindi-runtime" });
+    });
+
+    it("skips image paths (handled by vision, not fs.read)", async () => {
+      const plan = await planFs(`describe "C:\\pics\\shot one.png"`);
+      expect(plan.missing[0]!.input.params).toEqual({ op: "list", path: "" });
+    });
+
+    it("falls back to workspace list when no path is mentioned", async () => {
+      const plan = await planFs("list the files here");
+      expect(plan.missing[0]!.input.params).toEqual({ op: "list", path: "" });
+    });
+  });
 });

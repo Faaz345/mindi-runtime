@@ -92,7 +92,9 @@ function isWorkspaceTrusted(workspace: string): boolean {
   }
 }
 
-function trustWorkspace(workspace: string): void {
+/** Mark a workspace as trusted (writes .mindi/trusted). Exported so the
+ *  onboarding flow can trust the directory the user just configured. */
+export function trustWorkspace(workspace: string): void {
   try {
     const dir = path.join(workspace, ".mindi");
     if (!fs.existsSync(dir)) {

@@ -152,6 +152,13 @@ export interface IProvider {
   readonly capabilities: ReadonlySet<CapabilityType>;
   /** Models this provider exposes */
   listModels(): Promise<ProviderModel[]>;
+  /**
+   * Optional: return raw, uninterpreted model metadata from the provider's
+   * discovery endpoint (e.g. /models). The CapabilityDetector converts this
+   * into ModelCapabilityProfiles. Providers that don't implement this simply
+   * return undefined — detection falls back to the universal heuristic.
+   */
+  discoverModels?(): Promise<import("../capability/types.js").RawModelMetadata[] | undefined>;
   /** Probe whether a specific model is available */
   hasModel(modelId: string): Promise<boolean>;
   /** Does this provider declare the capability (for any of its models)? */
@@ -288,6 +295,34 @@ export interface ChatMessage {
   name?: string;
   /** Optional tool call id this message answers */
   toolCallId?: string;
+  /**
+   * Native function calls the assistant made (OpenAI-style tool calling).
+   * Present on assistant messages when the model invoked native tools;
+   * each call is answered by a `tool` role message with matching toolCallId.
+   */
+  toolCalls?: NativeToolCall[];
+}
+
+/**
+ * A native (provider-level) function tool definition, OpenAI-style.
+ * `name` must match ^[a-zA-Z0-9_-]{1,64}$ (no dots) — map dotted protocol
+ * names (fs.read) to safe names (fs_read) before sending.
+ */
+export interface NativeToolDefinition {
+  name: string;
+  description: string;
+  /** JSON Schema object describing the arguments */
+  parameters: Record<string, unknown>;
+}
+
+/** One native function call emitted by the model. */
+export interface NativeToolCall {
+  /** Provider-assigned call id (answered via toolCallId) */
+  id: string;
+  /** Function name (safe form, e.g. "fs_read") */
+  name: string;
+  /** Raw JSON string of the arguments, exactly as streamed */
+  argumentsJson: string;
 }
 
 export type ChatContent =
@@ -311,6 +346,12 @@ export interface ChatRequest {
   stop?: string[];
   /** Optional capability hints the model can lean on */
   capabilities?: CapabilityType[];
+  /**
+   * Native function tools the model may call (OpenAI-style function
+   * calling). Providers that don't support tool calling simply ignore
+   * this; the agent loop falls back to the textual tool protocol.
+   */
+  tools?: NativeToolDefinition[];
 }
 
 export interface ChatChunk {
@@ -322,6 +363,11 @@ export interface ChatChunk {
   done?: boolean;
   /** Optional finish reason */
   finishReason?: "stop" | "length" | "tool_call" | "error";
+  /**
+   * Completed native tool calls, emitted on the final chunk when the
+   * model invoked function tools (finishReason is typically "tool_call").
+   */
+  toolCalls?: NativeToolCall[];
 }
 
 // ---------------------------------------------------------------------------

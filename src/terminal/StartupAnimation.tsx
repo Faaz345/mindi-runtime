@@ -17,6 +17,7 @@
 import React, { useState, useEffect, useMemo } from "react";
 import { Text, Box } from "ink";
 import { renderLogo, clearLogoCache, type RenderResult } from "./logo-renderer.js";
+import { COLORS } from "./colors.js";
 
 type Phase = "pulse" | "reveal" | "underline" | "wordmark" | "tagline" | "done";
 
@@ -138,7 +139,7 @@ export function StartupAnimation({ onDone }: { onDone: () => void }): React.Reac
   }
 
   const padLeft = Math.max(0, Math.floor((80 - logo.width) / 2));
-  const brainColor = phase === "pulse" ? "cyan" : "white";
+  const brainColor = phase === "pulse" ? COLORS.azure : COLORS.white;
 
   return (
     <Box flexDirection="column" alignItems="center" justifyContent="center">
@@ -148,13 +149,13 @@ export function StartupAnimation({ onDone }: { onDone: () => void }): React.Reac
         </Text>
       ))}
       {underlineLen > 0 && (
-        <Text color="cyan">{"─".repeat(underlineLen)}</Text>
+        <Text color={COLORS.azure}>{"─".repeat(underlineLen)}</Text>
       )}
       {wordmarkVisible && (
-        <Text bold color="cyan">{logo.wordmark}</Text>
+        <Text bold color={COLORS.azure}>{logo.wordmark}</Text>
       )}
       {taglineVisible && (
-        <Text>{logo.tagline}</Text>
+        <Text color={COLORS.dim}>{logo.tagline}</Text>
       )}
     </Box>
   );

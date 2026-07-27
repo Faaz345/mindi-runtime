@@ -62,6 +62,27 @@ export function bootRuntime(overrides?: Partial<RuntimeConfig>): Runtime {
   // Layer 3: user overrides (highest priority)
   const config: RuntimeConfig = { ...envConfig, ...onboardConfig, ...overrides };
 
+  // Enable the persistent workspace session system for the terminal.
+  // This gives Claude Code / Cursor-style auto-restore of sessions, provider,
+  // model, history, and project memory across launches.
+  config.workspace = {
+    enabled: true,
+    rootDir: process.cwd(),
+    autoRestore: true,
+    autoSave: true,
+    maxHistoryMessages: overrides?.workspace?.maxHistoryMessages ?? 50,
+    ...overrides?.workspace,
+  };
+
+  // Trust is granted once per workspace by the terminal. Ensure that trusted
+  // root is always writable even when an older config saved an empty roots
+  // array; other configured roots remain available for explicit reads.
+  const workspaceRoot = config.workspace.rootDir ?? process.cwd();
+  config.sandbox = {
+    ...config.sandbox,
+    allowedRoots: Array.from(new Set([workspaceRoot, ...(config.sandbox?.allowedRoots ?? [])])),
+  };
+
   if (!overrides?.logLevel && process.env.MINDI_CLI_VERBOSE !== "1") {
     config.logLevel = "error";
   }

@@ -32,6 +32,12 @@ export class IntentAnalyzer {
     // Vision / image understanding
     { capability: Cap.Vision, pattern: /\bimage|picture|photo|screenshot|see this|look at|what('?s| is) in (this|the) (image|pic|photo)|describe (this|the) (image|photo|picture)|attached (image|photo|picture)|read (this|the) (chart|graph|diagram)\b/i, weight: 0.9, reason: "mentions image/photo/screenshot" },
     { capability: Cap.Vision, pattern: /\.(png|jpe?g|gif|webp|bmp|tiff?)$/i, weight: 0.85, reason: "image file extension" },
+    { capability: Cap.Vision, pattern: /screencapture|screen[-_ ]?shot|capture/i, weight: 0.9, reason: "screenshot/screencapture in path" },
+    { capability: Cap.Vision, pattern: /[A-Z]:\\[^\s"']+\.(png|jpe?g|gif|webp|bmp)/i, weight: 0.85, reason: "image file path (Windows)" },
+    { capability: Cap.Vision, pattern: /"[^"]+\.(png|jpe?g|gif|webp|bmp|tiff?)"/i, weight: 0.9, reason: "quoted image path (may contain spaces)" },
+    { capability: Cap.Vision, pattern: /'[^']+\.(png|jpe?g|gif|webp|bmp|tiff?)'/i, weight: 0.9, reason: "quoted image path (may contain spaces)" },
+    { capability: Cap.Vision, pattern: /\/[^\s"']+\.(png|jpe?g|gif|webp|bmp)/i, weight: 0.85, reason: "image file path (Unix)" },
+    { capability: Cap.Vision, pattern: /\b(analyze|analyse|review|inspect|describe)\s+(this\s+)?(image|screenshot|picture|photo|capture|screencapture)/i, weight: 0.9, reason: "analyze image/screenshot request" },
     // OCR — text extraction from images / scans
     { capability: Cap.OCR, pattern: /\bocr|extract text from|scan(ned)?|handwriting|read text in (this|the) (image|scan|photo)|transcribe (this|the) (image|scan|document)\b/i, weight: 0.9, reason: "OCR/extraction language" },
     { capability: Cap.OCR, pattern: /\.pdf$/i, weight: 0.6, reason: "PDF often needs OCR" },
@@ -91,6 +97,16 @@ export class IntentAnalyzer {
           });
         }
       }
+    }
+
+    // Suppress weak web-search signals when a strong vision signal is present.
+    // "What's in this image?" is a vision question about a local file — not a
+    // web search. Without this, the bare question words ("whats", "what is")
+    // trigger a useless web search for the file path string.
+    const visionSignal = byCap.get(Cap.Vision);
+    const searchSignal = byCap.get(Cap.WebSearch);
+    if (visionSignal && visionSignal.weight >= 0.8 && searchSignal && searchSignal.weight <= 0.5) {
+      byCap.delete(Cap.WebSearch);
     }
 
     const requiredCapabilities = Array.from(byCap.values())

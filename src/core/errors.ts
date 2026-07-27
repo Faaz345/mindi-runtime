@@ -29,6 +29,9 @@ export type ErrorCode =
   | "E_REQUEST_TIMEOUT"
   | "E_NO_PRIMARY_MODEL"
   | "E_MEMORY"
+  | "E_WORKSPACE"
+  | "E_WORKSPACE_NOT_FOUND"
+  | "E_SESSION_ARCHIVED"
   | "E_INTERNAL";
 
 /** Constructor options for any error. Flat: cause is extracted, rest -> meta. */
@@ -123,6 +126,16 @@ export class SessionError extends MindiError {
 export class RequestError extends MindiError {
   constructor(
     code: "E_REQUEST_CANCELLED" | "E_REQUEST_TIMEOUT",
+    message: string,
+    init?: ErrorInit,
+  ) {
+    super(code, message, init);
+  }
+}
+
+export class WorkspaceError extends MindiError {
+  constructor(
+    code: "E_WORKSPACE" | "E_WORKSPACE_NOT_FOUND" | "E_SESSION_ARCHIVED",
     message: string,
     init?: ErrorInit,
   ) {

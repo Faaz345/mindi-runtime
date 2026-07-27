@@ -17,6 +17,7 @@ import { BaseTool } from "../sandbox/BaseTool.js";
  *   - write  : write content to a file
  *   - list   : list entries in a directory
  *   - stat   : stat a path
+ *   - mkdir  : create a directory recursively
  *
  * All paths are resolved and verified against the sandbox's allowed roots.
  */
@@ -82,6 +83,12 @@ export class FilesystemTool extends BaseTool {
           type: e.isDirectory() ? ("dir" as const) : ("file" as const),
         }));
         payload = { kind: "files", entries: out };
+        break;
+      }
+      case "mkdir": {
+        const resolved = this.sb.resolvePath(target);
+        await fs.mkdir(resolved, { recursive: true });
+        payload = { kind: "structured", data: { created: true, path: resolved } };
         break;
       }
       case "stat": {

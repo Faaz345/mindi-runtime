@@ -12,25 +12,28 @@
 
 import React, { memo } from "react";
 import { Box, Text } from "ink";
+import fs from "node:fs";
+import path from "node:path";
 import { useLayout, wrapText } from "../layout/LayoutEngine.js";
 import { COLORS } from "../colors.js";
 
 interface MarkdownProps {
   text: string;
   isStreaming?: boolean;
+  expandCode?: boolean;
 }
 
-export const Markdown = memo(function Markdown({ text, isStreaming }: MarkdownProps): React.ReactElement {
+export const Markdown = memo(function Markdown({ text, isStreaming, expandCode }: MarkdownProps): React.ReactElement {
   const { regions } = useLayout();
   const blocks = parseBlocks(text);
   return (
     <Box flexDirection="column">
       {blocks.map((block, i) => (
-        <BlockView key={i} block={block} width={regions.contentWidth} isStreaming={isStreaming} />
+        <BlockView key={i} block={block} width={regions.contentWidth} isStreaming={isStreaming} expandCode={expandCode} />
       ))}
     </Box>
   );
-}, (prev, next) => prev.text === next.text && prev.isStreaming === next.isStreaming);
+}, (prev, next) => prev.text === next.text && prev.isStreaming === next.isStreaming && prev.expandCode === next.expandCode);
 
 // ---------------------------------------------------------------------------
 // Block types + parser
@@ -91,11 +94,11 @@ function parseBlocks(text: string): Block[] {
 // Memoized block views
 // ---------------------------------------------------------------------------
 
-const BlockView = memo(function BlockView({ block, width, isStreaming }: { block: Block; width: number; isStreaming?: boolean }): React.ReactElement {
+const BlockView = memo(function BlockView({ block, width, isStreaming, expandCode }: { block: Block; width: number; isStreaming?: boolean; expandCode?: boolean }): React.ReactElement {
   switch (block.type) {
     case "code": {
       const lines = block.content.split("\n");
-      return lines.length <= 40
+      return expandCode || lines.length <= 40
         ? <ShortCodeBlock lang={block.lang} lines={lines} width={width} />
         : <LongCodeBlock lang={block.lang} lines={lines} width={width} isStreaming={isStreaming} />;
     }
@@ -116,7 +119,7 @@ const BlockView = memo(function BlockView({ block, width, isStreaming }: { block
     case "hr":
       return <Text color={COLORS.border}>{"─".repeat(Math.min(width, 60))}</Text>;
   }
-}, (prev, next) => prev.block === next.block && prev.width === next.width && prev.isStreaming === next.isStreaming);
+}, (prev, next) => prev.block === next.block && prev.width === next.width && prev.isStreaming === next.isStreaming && prev.expandCode === next.expandCode);
 
 const ShortCodeBlock = memo(function ShortCodeBlock({ lang, lines, width }: { lang: string; lines: string[]; width: number }): React.ReactElement {
   return (
@@ -126,26 +129,26 @@ const ShortCodeBlock = memo(function ShortCodeBlock({ lang, lines, width }: { la
         <Text color={COLORS.dim}> {lines.length} lines</Text>
       </Box>
       {lines.map((line, i) => (
-        <Text key={i} wrap="truncate">{highlightLine(wrapText(line, width - 2), lang)}</Text>
+        <Text key={i} wrap="truncate"><Text color={COLORS.codeLineNumber}>{String(i + 1).padStart(String(lines.length).length)} │</Text>{highlightLine(wrapText(line, width - 8), lang)}</Text>
       ))}
     </Box>
   );
 }, (prev, next) => prev.lang === next.lang && prev.lines === next.lines && prev.width === next.width);
 
 const LongCodeBlock = memo(function LongCodeBlock({ lang, lines, width, isStreaming }: { lang: string; lines: string[]; width: number; isStreaming?: boolean }): React.ReactElement {
-  const [state, setState] = React.useState<"idle" | "asking" | "saved" | "skipped">("idle");
+  // Auto-save the full code block to .mindi/cache/code-blocks/ once streaming
+  // completes, then offer a Ctrl+Click hyperlink (OSC 8) to open it — plus a
+  // hint for /expand to print it inline. This replaces the old dead
+  // "Save to file? (Y/n)" prompt that had no input handler.
+  const ext = langToExtension(lang);
+  const [savedPath, setSavedPath] = React.useState<string | null>(null);
 
   React.useEffect(() => {
-    if (isStreaming) return undefined;
-    if (state === "idle") {
-      const t = setTimeout(() => setState("asking"), 200);
-      return () => clearTimeout(t);
-    }
+    if (isStreaming) return; // wait for the complete block
+    setSavedPath((prev) => prev ?? saveCodeBlock(lines.join("\n"), ext));
     return undefined;
-  }, [state, isStreaming]);
+  }, [isStreaming, lines, ext]);
 
-  const ext = langToExtension(lang);
-  const suggestedPath = `${process.cwd()}/output.${ext}`;
   const previewLines = lines.slice(0, 15);
   const hiddenCount = lines.length - 15;
 
@@ -156,17 +159,14 @@ const LongCodeBlock = memo(function LongCodeBlock({ lang, lines, width, isStream
         <Text color={COLORS.dim}> {lines.length} lines</Text>
       </Box>
       {previewLines.map((line, i) => (
-        <Text key={i} wrap="truncate">{highlightLine(wrapText(line, width - 2), lang)}</Text>
+        <Text key={i} wrap="truncate"><Text color={COLORS.codeLineNumber}>{String(i + 1).padStart(String(lines.length).length)} │</Text>{highlightLine(wrapText(line, width - 8), lang)}</Text>
       ))}
       {hiddenCount > 0 && <Text color={COLORS.dim}>  ... {hiddenCount} more lines</Text>}
-      {state === "asking" && (
-        <Box flexDirection="column" marginTop={1}>
-          <Text color={COLORS.sky} bold>  Save to file? (Y/n)</Text>
-          <Text color={COLORS.dim}>  Path: {suggestedPath}</Text>
-        </Box>
+      {!isStreaming && savedPath && (
+        <Text color={COLORS.dim}>  {"  "}💾 Full code saved — <Text color={COLORS.link} underline>{hyperlink(`Ctrl+Click to open`, savedPath)}</Text>
+          <Text color={COLORS.dim}> · or type /expand</Text>
+        </Text>
       )}
-      {state === "saved" && <Text color={COLORS.assistant}>  Saved: {suggestedPath}</Text>}
-      {state === "skipped" && <Text color={COLORS.dim}>  (not saved)</Text>}
     </Box>
   );
 }, (prev, next) => prev.lang === next.lang && prev.lines === next.lines && prev.width === next.width && prev.isStreaming === next.isStreaming);
@@ -199,11 +199,10 @@ function highlightLine(line: string, lang: string): React.ReactNode {
       if (KEYWORDS.has(w)) tokens.push({ text: w, color: COLORS.codeKeyword });
       else if (TYPES.has(w)) tokens.push({ text: w, color: COLORS.codeType });
       else if (w[0] === w[0]!.toUpperCase() && w[0] !== w[0]!.toLowerCase()) tokens.push({ text: w, color: COLORS.codeType });
+      else if (remaining.slice(w.length).match(/^\s*\(/)) tokens.push({ text: w, color: COLORS.codeFunction });
       else tokens.push({ text: w, color: COLORS.codeDefault });
       remaining = remaining.slice(w.length); continue;
     }
-    const fnMatch = remaining.match(/^([A-Za-z_$][A-Za-z0-9_$]*)\s*\(/);
-    if (fnMatch) { tokens.push({ text: fnMatch[1]!, color: COLORS.codeType }); tokens.push({ text: "(", color: COLORS.codeDefault }); remaining = remaining.slice(fnMatch[0]!.length); continue; }
     const wsMatch = remaining.match(/^\s+/);
     if (wsMatch) { tokens.push({ text: wsMatch[0] }); remaining = remaining.slice(wsMatch[0]!.length); continue; }
     tokens.push({ text: remaining[0]!, color: COLORS.codeDefault }); remaining = remaining.slice(1);
@@ -230,6 +229,36 @@ function findCommentStart(line: string, lang: string): number {
 function langToExtension(lang: string): string {
   const m: Record<string,string> = { javascript:"js",js:"js",jsx:"jsx",typescript:"ts",ts:"ts",tsx:"tsx",python:"py",py:"py",html:"html",css:"css",scss:"scss",json:"json",yaml:"yml",yml:"yml",bash:"sh",sh:"sh",shell:"sh",sql:"sql",go:"go",rust:"rs",java:"java",c:"c",cpp:"cpp",php:"php",ruby:"rb",dart:"dart",xml:"xml",markdown:"md",md:"md" };
   return m[lang.toLowerCase()] ?? "txt";
+}
+
+// ---------------------------------------------------------------------------
+// Full-code viewing: auto-save + OSC 8 hyperlink
+// ---------------------------------------------------------------------------
+
+/**
+ * Save a complete code block to .mindi/cache/code-blocks/ and return the
+ * absolute path. Returns null on failure (viewing is best-effort).
+ */
+function saveCodeBlock(content: string, ext: string): string | null {
+  try {
+    const dir = path.join(process.cwd(), ".mindi", "cache", "code-blocks");
+    fs.mkdirSync(dir, { recursive: true });
+    const file = path.join(dir, `code-${Date.now()}.${ext}`);
+    fs.writeFileSync(file, content, "utf8");
+    return file;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Wrap text in an OSC 8 terminal hyperlink. In Windows Terminal, iTerm2,
+ * WezTerm, and most modern terminals, the text becomes Ctrl+Click-able and
+ * opens the target in the default app (browser/editor).
+ */
+function hyperlink(text: string, filePath: string): string {
+  const url = `file:///${filePath.replace(/\\/g, "/")}`;
+  return `\x1b]8;;${url}\x07${text}\x1b]8;;\x07`;
 }
 
 // ---------------------------------------------------------------------------

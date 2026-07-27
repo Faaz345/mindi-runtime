@@ -7,6 +7,7 @@
 
 import React, { useState, useEffect } from "react";
 import { Text, Box } from "ink";
+import { COLORS } from "./colors.js";
 
 interface BootStep {
   label: string;
@@ -51,16 +52,16 @@ export function BootSequence({ onDone }: { onDone: () => void }): React.ReactEle
       <Box flexDirection="column">
         {steps.map((step, i) => (
           <Box key={i} gap={1}>
-            <Text>
+            <Text color={step.status === "done" ? COLORS.ice : step.status === "running" ? COLORS.sky : COLORS.dim}>
               {step.status === "done" ? "✓" : step.status === "running" ? "◉" : "○"}
             </Text>
             <Text
-              color={step.status === "done" ? "green" : step.status === "running" ? "cyan" : "gray"}
+              color={step.status === "done" ? COLORS.ice : step.status === "running" ? COLORS.white : COLORS.dim}
             >
               {step.label}
             </Text>
             {step.status === "running" && (
-              <Text color="cyan">...</Text>
+              <Text color={COLORS.sky}>...</Text>
             )}
           </Box>
         ))}

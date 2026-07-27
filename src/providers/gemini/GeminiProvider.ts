@@ -13,6 +13,11 @@ import type {
 import { CapabilityType as Cap } from "../../core/types.js";
 import { ProviderError } from "../../core/errors.js";
 import { BaseProvider } from "../BaseProvider.js";
+import {
+  buildProfile,
+  normalizeGeminiModelMetadata,
+} from "../../capability/CapabilityDetector.js";
+import type { RawModelMetadata } from "../../capability/types.js";
 
 /**
  * Google Gemini provider.
@@ -59,66 +64,74 @@ export class GeminiProvider extends BaseProvider {
   protected modelCapabilities(modelId: string): CapabilityType[] {
     const override = this.opts.models?.[modelId];
     if (override) return override.capabilities;
-    const caps: CapabilityType[] = [Cap.Chat];
-    // All Gemini 1.5+ models are multimodal
-    if (modelId.includes("1.5") || modelId.includes("2.0") || modelId.includes("2.5") || modelId.includes("gemini-")) {
-      caps.push(Cap.Vision);
-    }
-    if (modelId.includes("embedding")) caps.push(Cap.Embeddings);
-    return caps;
+    // Delegate to the shared detector — no hardcoded lists here.
+    return buildProfile(this.id, modelId).nativeCapabilities;
   }
 
   /**
-   * Real capability discovery for Gemini models.
-   * Calls /models/{model} to get supportedGenerationMethods + token limits.
+   * Raw metadata discovery from the Gemini /models endpoint.
+   * Returns supportedGenerationMethods + token limits per model; the
+   * CapabilityDetector derives the profile from it.
+   */
+  async discoverModels(): Promise<RawModelMetadata[] | undefined> {
+    try {
+      const ctx = makeSyntheticContext();
+      const url = `${GEMINI_BASE}/models?key=${encodeURIComponent(this.opts.apiKey)}`;
+      const res = await this.http(url, { method: "GET" }, ctx);
+      const data = (await res.json()) as { models?: Array<Record<string, unknown>> };
+      if (!Array.isArray(data.models)) return undefined;
+      return data.models.map(normalizeGeminiModelMetadata);
+    } catch {
+      return undefined;
+    }
+  }
+
+  /**
+   * Metadata-first capability resolution for Gemini models.
+   * Calls /models/{model} for supportedGenerationMethods + token limits,
+   * then derives capabilities via the shared detector.
    */
   protected async resolveDeclaration(modelId: string): Promise<ProviderCapabilityDeclaration> {
     const cleanId = modelId.replace(/^models\//, "");
-    const caps = this.modelCapabilities(cleanId);
-    const isEmbedding = caps.includes(Cap.Embeddings);
-    const isMultimodal = caps.includes(Cap.Vision);
+    const override = this.opts.models?.[cleanId];
     const isFlash = cleanId.includes("flash");
     const isPro = cleanId.includes("pro");
 
-    let maxContext = 32_000;
-    let label = cleanId;
+    let raw: RawModelMetadata | undefined;
     let supportedMethods: string[] = [];
-
     try {
       const ctx = makeSyntheticContext();
       const url = `${GEMINI_BASE}/models/${cleanId}?key=${encodeURIComponent(this.opts.apiKey)}`;
       const res = await this.http(url, { method: "GET" }, ctx);
-      const data = (await res.json()) as {
-        name: string;
-        displayName?: string;
-        supportedGenerationMethods?: string[];
-        inputTokenLimit?: number;
-        outputTokenLimit?: number;
-      };
-      label = data.displayName ?? cleanId;
-      supportedMethods = data.supportedGenerationMethods ?? [];
-      if (data.inputTokenLimit) maxContext = data.inputTokenLimit;
+      const data = (await res.json()) as Record<string, unknown>;
+      raw = normalizeGeminiModelMetadata(data);
+      supportedMethods = raw.supportedGenerationMethods ?? [];
     } catch {
-      // Fallback: infer from model id.
-      maxContext = inferGeminiContextWindow(cleanId);
+      raw = undefined;
     }
+
+    const profile = buildProfile(this.id, cleanId, raw, raw ? "api" : "heuristic");
+    const capabilities = override?.capabilities ?? profile.nativeCapabilities;
+    const isEmbedding = capabilities.includes(Cap.Embeddings);
+    const isMultimodal = capabilities.includes(Cap.Vision);
 
     return {
       providerId: this.id,
       modelId: cleanId,
-      label,
-      capabilities: caps,
-      streaming: supportedMethods.includes("streamGenerateContent") || true,
-      toolCalling: supportedMethods.includes("generateContent") && !isEmbedding,
+      label: profile.label ?? cleanId,
+      capabilities,
+      streaming: true,
+      toolCalling: profile.toolCalling && !isEmbedding,
       multimodal: isMultimodal,
       embeddingSupport: isEmbedding,
       imageGeneration: false, // Gemini doesn't expose image generation via this API
-      audioSupport: cleanId.includes("audio") || supportedMethods.includes("generateContent") && isPro,
-      maxContext,
-      maxOutputTokens: supportedMethods.length > 0 ? 8192 : undefined,
+      audioSupport: profile.audioInput || cleanId.includes("audio") || (supportedMethods.includes("generateContent") && isPro),
+      maxContext: override?.contextWindow ?? profile.contextWindow ?? 32_000,
+      maxOutputTokens: profile.maxOutputTokens,
       metadata: {
         family: isFlash ? "gemini-flash" : isPro ? "gemini-pro" : "gemini",
         supportedMethods,
+        metadataSource: profile.metadataSource,
       },
       resolvedAt: Date.now(),
     };
@@ -129,22 +142,22 @@ export class GeminiProvider extends BaseProvider {
     const url = `${GEMINI_BASE}/models?key=${encodeURIComponent(this.opts.apiKey)}`;
     const res = await this.http(url, { method: "GET" }, ctx);
     const data = (await res.json()) as {
-      models: Array<{
-        name: string;
-        displayName?: string;
-        supportedGenerationMethods?: string[];
-        inputTokenLimit?: number;
-      }>;
+      models: Array<Record<string, unknown>>;
     };
     return data.models
-      .filter((m) => (m.supportedGenerationMethods ?? []).includes("generateContent") || (m.supportedGenerationMethods ?? []).includes("embedContent"))
+      .filter((m) => {
+        const methods = (m.supportedGenerationMethods as string[] | undefined) ?? [];
+        return methods.includes("generateContent") || methods.includes("embedContent");
+      })
       .map((m) => {
-        const id = m.name.replace(/^models\//, "");
+        const raw = normalizeGeminiModelMetadata(m);
+        const profile = buildProfile(this.id, raw.id, raw, "api");
+        const override = this.opts.models?.[raw.id];
         return {
-          id,
-          label: m.displayName ?? id,
-          capabilities: this.modelCapabilities(id),
-          contextWindow: m.inputTokenLimit,
+          id: raw.id,
+          label: raw.label ?? raw.id,
+          capabilities: override?.capabilities ?? profile.nativeCapabilities,
+          contextWindow: override?.contextWindow ?? raw.contextLength,
         };
       });
   }
@@ -406,15 +419,4 @@ function makeSyntheticContext(): ExecutionContext {
     },
     events: { emit() {}, on() { return () => {} }, clear() {} },
   };
-}
-
-/** Heuristic context window inference for Gemini models. */
-function inferGeminiContextWindow(modelId: string): number {
-  if (modelId.includes("2.5")) return 1_000_000;
-  if (modelId.includes("2.0")) return 1_000_000;
-  if (modelId.includes("1.5-pro")) return 2_000_000;
-  if (modelId.includes("1.5-flash")) return 1_000_000;
-  if (modelId.includes("1.0-pro")) return 32_000;
-  if (modelId.includes("embedding")) return 2048;
-  return 32_000;
 }

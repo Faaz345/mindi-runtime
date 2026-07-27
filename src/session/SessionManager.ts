@@ -61,6 +61,31 @@ export class SessionManager {
     return session;
   }
 
+  /**
+   * Restore a session with a KNOWN id and prior history (used when mirroring
+   * a persisted workspace session into the in-memory manager on launch).
+   * If a session with this id already exists it is returned unchanged.
+   */
+  restore(id: string, init: SessionInit, history: ChatMessage[]): Session {
+    const existing = this.sessions.get(id);
+    if (existing) return existing;
+    const now = Date.now();
+    const session: Session = {
+      id,
+      providerId: init.providerId,
+      modelId: init.modelId,
+      systemPrompt: init.systemPrompt,
+      meta: { ...(init.meta ?? {}) },
+      createdAt: now,
+      updatedAt: now,
+    };
+    this.sessions.set(id, session);
+    if (history.length > 0) {
+      void this.memory.remember(id, history);
+    }
+    return session;
+  }
+
   get(id: string): Session {
     const s = this.sessions.get(id);
     if (!s) {

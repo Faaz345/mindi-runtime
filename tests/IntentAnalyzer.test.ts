@@ -51,4 +51,30 @@ describe("IntentAnalyzer", () => {
     const i = a.analyze(long);
     expect(i.summary.length).toBeLessThanOrEqual(140);
   });
+
+  it("detects vision from a quoted Windows path with spaces", () => {
+    const i = a.analyze('"C:\\Users\\faazr\\Downloads\\MINDI bot design.png"');
+    expect(i.requiredCapabilities).toContain(CapabilityType.Vision);
+  });
+
+  it("detects vision from a single-quoted path with spaces", () => {
+    const i = a.analyze("'C:\\Users\\me\\My Screenshot 2024.png'");
+    expect(i.requiredCapabilities).toContain(CapabilityType.Vision);
+  });
+
+  it("detects vision from an unquoted Windows path without spaces", () => {
+    const i = a.analyze("C:\\Users\\me\\shot.png");
+    expect(i.requiredCapabilities).toContain(CapabilityType.Vision);
+  });
+
+  it("does NOT trigger web search for 'whats in this image?' with an image path", () => {
+    const i = a.analyze("C:\\Users\\faazr\\Downloads\\image2.png whats in this image?");
+    expect(i.requiredCapabilities).toContain(CapabilityType.Vision);
+    expect(i.requiredCapabilities).not.toContain(CapabilityType.WebSearch);
+  });
+
+  it("still triggers web search for genuine factual questions without images", () => {
+    const i = a.analyze("whats the latest news on Mars?");
+    expect(i.requiredCapabilities).toContain(CapabilityType.WebSearch);
+  });
 });

@@ -176,12 +176,51 @@ export function mapHttpError(
   else if (status === 429) code = "E_PROVIDER_RATE_LIMIT";
   else if (status >= 500) code = "E_PROVIDER_UNAVAILABLE";
   else code = "E_PROVIDER_ERROR";
-  return new ProviderError(code, `Provider ${providerId} HTTP ${status}: ${truncate(body, 500)}`, {
+  // Extract the real upstream reason from the body when possible, so users
+  // see "Rate limit exceeded: free-models-per-day" instead of raw JSON.
+  const reason = extractUpstreamMessage(body) ?? truncate(body, 500);
+  return new ProviderError(code, `Provider ${providerId} HTTP ${status}: ${reason}`, {
     providerId,
     url,
     status,
     body: truncate(body, 2000),
   });
+}
+
+/**
+ * Pull the human-readable message out of common provider error envelopes:
+ *   - OpenRouter / OpenAI: {"error": {"message": "...", "code": 429, "metadata": {...}}}
+ *   - Generic:             {"message": "..."}
+ *   - Nested proxies:      {"error": {"message": "...", "metadata": {"raw": "..."}}}
+ * Returns null when the body isn't recognizable JSON.
+ */
+function extractUpstreamMessage(body: string): string | null {
+  try {
+    const j = JSON.parse(body) as {
+      error?: { message?: unknown; metadata?: { raw?: unknown } };
+      message?: unknown;
+    };
+    const errObj = j?.error;
+    if (errObj && typeof errObj.message === "string" && errObj.message) {
+      // Some proxies nest the real upstream error inside metadata.raw.
+      const raw = errObj.metadata?.raw;
+      if (typeof raw === "string" && raw) {
+        try {
+          const inner = JSON.parse(raw) as { error?: { message?: unknown } };
+          if (typeof inner?.error?.message === "string" && inner.error.message) {
+            return inner.error.message;
+          }
+        } catch {
+          // raw wasn't JSON — fall through to the outer message.
+        }
+      }
+      return errObj.message;
+    }
+    if (typeof j?.message === "string" && j.message) return j.message;
+    return null;
+  } catch {
+    return null;
+  }
 }
 
 function truncate(s: string, n: number): string {
