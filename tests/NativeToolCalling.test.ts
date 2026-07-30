@@ -74,6 +74,15 @@ describe("buildAgentSystemPrompt — native variant", () => {
     const p = buildAgentSystemPrompt({ ...base, nativeTools: false });
     expect(p).toContain(`<tool_call>{"name":"<tool>","arguments":{...}}</tool_call>`);
   });
+
+  it("both modes teach the sandbox rules (stop fs/terminal flailing)", () => {
+    for (const nativeTools of [true, false]) {
+      const p = buildAgentSystemPrompt({ ...base, nativeTools });
+      expect(p).toContain("Sandbox rules");
+      expect(p).toContain("INSIDE the workspace");
+      expect(p).toContain("not allow-listed");
+    }
+  });
 });
 
 // ---------------------------------------------------------------------------

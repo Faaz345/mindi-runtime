@@ -173,7 +173,9 @@ export class GraphExecutor {
     });
 
     const preferTool = node.executorType === "tool" || node.executorType === "auto";
+    const candidates = this.router.selectExecutors(node.capability, node.input, preferTool);
     let lastError: unknown;
+    let lastFailure: CapabilityResult | undefined;
 
     for (let attempt = 0; attempt < node.retryPolicy.maxAttempts; attempt++) {
       node.attempts = attempt + 1;
@@ -181,44 +183,74 @@ export class GraphExecutor {
         await sleep(node.retryPolicy.backoffMs * attempt);
         ctx.log.debug("graph.node.retry", { nodeId: node.id, attempt });
       }
-      try {
-        const executor = this.router.selectExecutor(node.capability, node.input, preferTool);
-        ctx.events.emit({
-          type: "capability:dispatch",
-          requestId: ctx.requestId,
-          capabilityId: executor.id,
-          capabilityType: node.capability,
-          executor: executor.source,
-          timestamp: Date.now(),
-        });
 
-        const execStart = Date.now();
-        const result = await this.runWithTimeout(executor, node, ctx);
-        if (!result.durationMs) result.durationMs = Date.now() - execStart;
+      // Sweep candidate executors: when a PROVIDER fails (error result or
+      // throw), fail over to the next provider instead of giving up — this
+      // lets vision fall through to a provider that actually has a
+      // vision-capable model when the first one doesn't. TOOL executors do
+      // NOT fail over: tools are deterministic, and a tool failure (sandbox
+      // violation, ENOENT, ...) must surface, not be masked by a fallback.
+      for (const executor of candidates) {
+        try {
+          ctx.events.emit({
+            type: "capability:dispatch",
+            requestId: ctx.requestId,
+            capabilityId: executor.id,
+            capabilityType: node.capability,
+            executor: executor.source,
+            timestamp: Date.now(),
+          });
 
-        ctx.events.emit({
-          type: "capability:success",
-          requestId: ctx.requestId,
-          capabilityId: executor.id,
-          durationMs: result.durationMs,
-          timestamp: Date.now(),
-        });
-        return result;
-      } catch (err) {
-        lastError = err;
-        const code = err instanceof MindiError ? err.code : "E_INTERNAL";
-        ctx.events.emit({
-          type: "capability:error",
-          requestId: ctx.requestId,
-          capabilityId: `node:${node.id}`,
-          error: err instanceof Error ? err.message : String(err),
-          timestamp: Date.now(),
-        });
-        if (!node.retryPolicy.retryOn.includes(code)) break;
+          const execStart = Date.now();
+          const result = await this.runWithTimeout(executor, node, ctx);
+          if (!result.durationMs) result.durationMs = Date.now() - execStart;
+
+          if (result.ok) {
+            ctx.events.emit({
+              type: "capability:success",
+              requestId: ctx.requestId,
+              capabilityId: executor.id,
+              durationMs: result.durationMs,
+              timestamp: Date.now(),
+            });
+            return result;
+          }
+
+          // Executor returned a structured failure.
+          lastFailure = result;
+          ctx.events.emit({
+            type: "capability:error",
+            requestId: ctx.requestId,
+            capabilityId: executor.id,
+            error: result.error ?? "execution failed",
+            timestamp: Date.now(),
+          });
+          ctx.log.debug("graph.node.failover", { nodeId: node.id, failedExecutor: executor.id, error: result.error });
+        } catch (err) {
+          lastError = err;
+          ctx.events.emit({
+            type: "capability:error",
+            requestId: ctx.requestId,
+            capabilityId: executor.id,
+            error: err instanceof Error ? err.message : String(err),
+            timestamp: Date.now(),
+          });
+        }
+        // Tools fail fast (deterministic — no alternate reality to try).
+        if (executor.source !== "provider") break;
       }
+
+      // Whole sweep failed — decide whether another attempt is worthwhile.
+      const code = lastError instanceof MindiError ? lastError.code : "E_CAPABILITY_FAILED";
+      if (!node.retryPolicy.retryOn.includes(code)) break;
+      lastFailure = undefined;
+      lastError = undefined;
     }
 
-    throw toMindiError(lastError);
+    // Preserve legacy behavior: a structured failure RESULT is returned
+    // (treated as a completed node), while thrown errors propagate.
+    if (lastFailure) return lastFailure;
+    throw toMindiError(lastError ?? new Error(`Capability "${node.capability}" failed on all executors`));
   }
 
   /**

@@ -375,10 +375,12 @@ export class Runtime {
 
   private async *requestInternal(input: string | RuntimeRequestInput): AsyncIterable<StreamEvent> {
     const initialReq = normalizeInput(input);
-    const pathAttachment = extractImageAttachment(initialReq, this.config.sandbox.allowedRoots);
-    const req: RuntimeRequestInput = pathAttachment
-      ? { ...initialReq, attachments: [...(initialReq.attachments ?? []), pathAttachment] }
+    const pathResult = extractImageAttachment(initialReq, this.config.sandbox.allowedRoots);
+    const req: RuntimeRequestInput = pathResult?.attachment
+      ? { ...initialReq, attachments: [...(initialReq.attachments ?? []), pathResult.attachment] }
       : initialReq;
+    // Set when the user referenced an image that couldn't be read from disk.
+    const imageReadWarning = pathResult?.warning;
     const requestId = req.requestId ?? randomUUID();
     const session = this.sessions.get(req.sessionId);
     const provider = this.providers.getPrimary(session.providerId);
@@ -427,6 +429,8 @@ export class Runtime {
 
       const capabilityMessages: ChatMessage[] = [];
       const usedCapabilityTypes: CapabilityType[] = [];
+      let visionAugmentFailed = false;
+      let visionAugmentOk = false;
       if (req.mode !== "plan") {
         // 3. Plan what the model lacks, then execute only in Build mode.
         const plan = await this.planner.plan(intent, provider, modelId, {
@@ -464,6 +468,10 @@ export class Runtime {
         for await (const { result } of this.graphExecutor.execute(execGraph, ctx)) {
           capabilityMessages.push(this.context.buildMessage(result));
           usedCapabilityTypes.push(result.type);
+          if (result.type === ("vision" as CapabilityType)) {
+            if (result.ok) visionAugmentOk = true;
+            else visionAugmentFailed = true;
+          }
           yield {
             type: "capability",
             capabilityType: result.type,
@@ -564,6 +572,28 @@ export class Runtime {
         ...capabilityMessages,
         userMessage,
       ];
+      // Unreadable image path — warn EVERY model (not just vision-native
+      // ones) so it never burns turns probing the filesystem for the file.
+      if (imageReadWarning && !imageWarning) {
+        augmented.splice(augmented.length - 1, 0, { role: "system", content: imageReadWarning });
+      }
+      // Vision augmentation was attempted and failed on every provider.
+      // Without this note the model tries to inspect the image itself with
+      // fs/terminal tools — all sandbox-blocked — and wastes the whole loop.
+      if (visionAugmentFailed && !visionAugmentOk) {
+        augmented.splice(augmented.length - 1, 0, {
+          role: "system",
+          content: [
+            "[System note: the user referenced an image. The runtime read the image",
+            "file and attempted vision analysis, but it FAILED on every configured",
+            "provider (no vision-capable model available). The file EXISTS — do NOT",
+            "try to locate, read, stat, or list it with filesystem/terminal tools.",
+            "Tell the user plainly that image analysis is unavailable right now,",
+            "suggest selecting a vision-capable model/provider, and ask how to",
+            "proceed. Never fabricate an analysis from the filename.]",
+          ].join(" "),
+        });
+      }
       if (req.mode === "plan") {
         augmented.splice(1, 0, {
           role: "system",
@@ -1175,7 +1205,7 @@ function imagePartsToDataUri(
 function extractImageAttachment(
   req: RuntimeRequestInput,
   allowedRoots: readonly string[],
-): { name: string; mimeType: string; data: string } | undefined {
+): { attachment?: { name: string; mimeType: string; data: string }; warning?: string } | undefined {
   if (req.attachments?.some((a) => a.mimeType?.startsWith("image/") && a.data)) return undefined;
   const match = req.text.match(/"([^"\r\n]+\.(?:png|jpe?g|gif|webp|bmp|tiff?))"|'([^'\r\n]+\.(?:png|jpe?g|gif|webp|bmp|tiff?))'|([A-Za-z]:[\\/][^\s"']+\.(?:png|jpe?g|gif|webp|bmp|tiff?))|(\/[^\s"']+\.(?:png|jpe?g|gif|webp|bmp|tiff?))/i);
   const filePath = match?.[1] ?? match?.[2] ?? match?.[3] ?? match?.[4];
@@ -1183,14 +1213,23 @@ function extractImageAttachment(
   // A path pasted directly into the prompt is an explicit user attachment,
   // not autonomous tool access. General filesystem tools remain sandboxed.
   const dataUri = readImageAsDataUri(filePath, allowedRoots, true);
-  if (!dataUri) return undefined;
+  if (!dataUri) {
+    // The user referenced an image but it can't be read (missing, inaccessible,
+    // too large, or unsupported). Surface a warning for EVERY model — not just
+    // vision-native ones — so the model never wastes turns probing for it.
+    return {
+      warning: `[System note: the user referenced an image file, but it could not be read from disk (file not found, inaccessible, or an unsupported format): ${filePath}. Do NOT try to locate or read it with filesystem/terminal tools, and do NOT pretend to analyze it — tell the user the file could not be read and ask them to verify the path or drag the image into the prompt directly.]`,
+    };
+  }
   const comma = dataUri.indexOf(",");
   const header = dataUri.slice(0, comma);
   const mimeType = header.slice(5, header.indexOf(";"));
   return {
-    name: path.basename(filePath),
-    mimeType,
-    data: dataUri.slice(comma + 1),
+    attachment: {
+      name: path.basename(filePath),
+      mimeType,
+      data: dataUri.slice(comma + 1),
+    },
   };
 }
 

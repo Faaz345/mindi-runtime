@@ -263,9 +263,28 @@ describe("GraphExecutor", () => {
 
   it("handles mixed parallel + sequential (research pattern)", async () => {
     const reg = new CapabilityRegistry();
-    reg.register(makeCap("tool.search", CapabilityType.WebSearch, 30));
-    reg.register(makeCap("tool.browse", CapabilityType.Browser, 30));
-    reg.register(makeCap("tool.ocr", CapabilityType.OCR, 20));
+    // Track real concurrency instead of wall-clock time — timing thresholds
+    // are flaky when the full test suite runs files in parallel workers.
+    let active = 0;
+    let maxActive = 0;
+    const tracked = (id: string, type: CapabilityType, delay: number): ICapability => {
+      const cap = makeCap(id, type, delay);
+      return {
+        ...cap,
+        execute: async (input, ctx) => {
+          active++;
+          maxActive = Math.max(maxActive, active);
+          try {
+            return await cap.execute(input, ctx);
+          } finally {
+            active--;
+          }
+        },
+      };
+    };
+    reg.register(tracked("tool.search", CapabilityType.WebSearch, 30));
+    reg.register(tracked("tool.browse", CapabilityType.Browser, 30));
+    reg.register(tracked("tool.ocr", CapabilityType.OCR, 20));
     const router = new CapabilityRouter(reg);
     const executor = new GraphExecutor(router);
 
@@ -275,14 +294,11 @@ describe("GraphExecutor", () => {
     b.addNode({ id: "ocr", capability: CapabilityType.OCR, input: mkInput(CapabilityType.OCR), executorType: "tool", dependencies: ["browse"] });
     const graph = b.build();
 
-    const start = Date.now();
     const results: NodeResult[] = [];
     for await (const r of executor.execute(graph, makeCtx())) results.push(r);
-    const duration = Date.now() - start;
 
-    // search + browse in parallel (~30ms), then ocr (~20ms) = ~50ms total
-    // if sequential: 30 + 30 + 20 = 80ms
-    expect(duration).toBeLessThan(75);
+    // search + browse overlapped (parallel), then ocr ran alone (sequential).
+    expect(maxActive).toBe(2);
     expect(results).toHaveLength(3);
     // browse and search should come before ocr
     const ocrIdx = results.findIndex((r) => r.nodeId === "ocr");

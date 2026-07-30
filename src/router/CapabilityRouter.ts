@@ -44,6 +44,20 @@ export class CapabilityRouter {
     input: CapabilityInput,
     preferTool: boolean,
   ): ICapability {
+    return this.selectExecutors(type, input, preferTool)[0]!;
+  }
+
+  /**
+   * Ordered candidate list for a capability + input — best first.
+   * The GraphExecutor sweeps this list when an executor fails, so a
+   * capability with several providers (e.g. vision across gateways)
+   * fails over to the next one instead of giving up on the first error.
+   */
+  selectExecutors(
+    type: import("../core/types.js").CapabilityType,
+    input: CapabilityInput,
+    preferTool: boolean,
+  ): ICapability[] {
     const candidates = this.registry.getByType(type);
     if (candidates.length === 0) {
       throw new CapabilityError(
@@ -52,7 +66,17 @@ export class CapabilityRouter {
         { capabilityType: type },
       );
     }
-    return this.pickExecutor(candidates, input, preferTool);
+    const ordered: ICapability[] = [];
+    if (preferTool) {
+      const tool = candidates.find((c) => c.source === "tool" && c.canHandle(input));
+      if (tool) ordered.push(tool);
+    }
+    for (const c of candidates) {
+      if (ordered.includes(c)) continue;
+      if (c.canHandle(input)) ordered.push(c);
+    }
+    if (ordered.length === 0) ordered.push(candidates[0]!);
+    return ordered;
   }
 
   /**
