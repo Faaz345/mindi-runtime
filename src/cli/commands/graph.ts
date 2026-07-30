@@ -1,4 +1,4 @@
-/** `mindi graph` — visualizes the execution graph for a request. */
+/** `mindi-cli graph` — visualizes the execution graph for a request. */
 
 import type { Runtime, StreamEvent } from "../../index.js";
 import { header, info, warn, error, colors, icons, formatMs, section } from "../format.js";

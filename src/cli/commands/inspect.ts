@@ -1,4 +1,4 @@
-/** `mindi inspect` — shows session history + runtime state. */
+/** `mindi-cli inspect` — shows session history + runtime state. */
 
 import type { Runtime } from "../../index.js";
 import { header, section, info, warn, error, colors, icons, table, formatMs } from "../format.js";

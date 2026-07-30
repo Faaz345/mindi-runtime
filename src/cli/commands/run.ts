@@ -1,4 +1,4 @@
-/** `mindi run` — executes a request, streams output, shows augmentation. */
+/** `mindi-cli run` — executes a request, streams output, shows augmentation. */
 
 import type { Runtime, StreamEvent } from "../../index.js";
 import { header, info, error, success, colors, icons, formatMs } from "../format.js";

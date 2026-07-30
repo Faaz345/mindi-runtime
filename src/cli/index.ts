@@ -6,7 +6,7 @@
  * Every command communicates only with the Runtime public API.
  *
  * Usage:
- *   mindi <command> [options]
+ *   mindi-cli <command> [options]
  *
  * Commands:
  *   init         Create .env configuration file
@@ -42,7 +42,7 @@ const HELP_TEXT = `
 ${colors.bold("MINDI Runtime CLI")}
 
 ${colors.cyan("Usage:")}
-  mindi <command> [options]
+  mindi-cli <command> [options]
 
 ${colors.cyan("Commands:")}
   setup       First-run onboarding wizard (interactive)
@@ -73,13 +73,13 @@ ${colors.cyan("Options:")}
   --verbose      Show runtime logs
 
 ${colors.cyan("Examples:")}
-  mindi init
-  mindi doctor
-  mindi run "list files in my directory"
-  mindi run "describe this image" --model gpt-4o
-  mindi graph "browse to https://example.com and take a screenshot"
-  mindi logs --follow --filter capability
-  mindi inspect --session <id> --events --metrics
+  mindi-cli init
+  mindi-cli doctor
+  mindi-cli run "list files in my directory"
+  mindi-cli run "describe this image" --model gpt-4o
+  mindi-cli graph "browse to https://example.com and take a screenshot"
+  mindi-cli logs --follow --filter capability
+  mindi-cli inspect --session <id> --events --metrics
 `;
 
 async function main(): Promise<void> {
@@ -164,8 +164,8 @@ async function main(): Promise<void> {
     case "run": {
       const text = args.positional.join(" ") || getString(args, "text");
       if (!text) {
-        error("Usage: mindi run \"<your prompt>\"");
-        error("Example: mindi run \"list the files in my directory\"");
+        error("Usage: mindi-cli run \"<your prompt>\"");
+        error("Example: mindi-cli run \"list the files in my directory\"");
         process.exit(1);
       }
       await runCommand(rt, {
@@ -190,8 +190,8 @@ async function main(): Promise<void> {
     case "graph": {
       const text = args.positional.join(" ") || getString(args, "text");
       if (!text) {
-        error("Usage: mindi graph \"<your prompt>\"");
-        error("Example: mindi graph \"browse to https://example.com and take a screenshot\"");
+        error("Usage: mindi-cli graph \"<your prompt>\"");
+        error("Example: mindi-cli graph \"browse to https://example.com and take a screenshot\"");
         process.exit(1);
       }
       await graphCommand(rt, {

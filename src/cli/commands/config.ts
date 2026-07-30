@@ -1,4 +1,4 @@
-/** `mindi config` — shows/validates resolved config. */
+/** `mindi-cli config` — shows/validates resolved config. */
 
 import type { Runtime } from "../../index.js";
 import { header, section, info, warn, success, error, colors, formatMs } from "../format.js";
@@ -23,9 +23,9 @@ export function configCommand(rt: Runtime): void {
       }
     }
   } else if (hasConfig) {
-    warn("Onboarding incomplete. Run `mindi setup` to complete.");
+    warn("Onboarding incomplete. Run `mindi-cli setup` to complete.");
   } else {
-    warn("Not onboarded. Run `mindi setup` to get started.");
+    warn("Not onboarded. Run `mindi-cli setup` to get started.");
   }
 
   const cfg = rt.config;
@@ -54,7 +54,7 @@ export function configCommand(rt: Runtime): void {
   }
 
   if (!openai.apiKey && !gemini.apiKey) {
-    error("No providers configured. Run `mindi init` to create a .env file.");
+    error("No providers configured. Run `mindi-cli init` to create a .env file.");
   }
 
   section("Sandbox");

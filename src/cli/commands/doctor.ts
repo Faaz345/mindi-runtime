@@ -1,4 +1,4 @@
-/** `mindi doctor` — health checks all providers, shows diagnostics. */
+/** `mindi-cli doctor` — health checks all providers, shows diagnostics. */
 
 import type { Runtime } from "../../index.js";
 import { header, section, success, warn, error, info, table, formatMs, colors, icons } from "../format.js";

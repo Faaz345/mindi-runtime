@@ -1,4 +1,4 @@
-/** `mindi logs` — shows runtime event history / live event stream. */
+/** `mindi-cli logs` — shows runtime event history / live event stream. */
 
 import type { Runtime, RuntimeEvent } from "../../index.js";
 import { header, info, warn, colors, icons } from "../format.js";
@@ -25,7 +25,7 @@ export async function logsCommand(
 
   const history = rt.getHistory();
   if (history.length === 0) {
-    warn("No events in history. Run a request first (mindi run).");
+    warn("No events in history. Run a request first (mindi-cli run).");
     return;
   }
 
