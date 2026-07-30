@@ -4,6 +4,88 @@
 
 ---
 
+## Getting Started
+
+**Already have Node.js 22+?** Two commands:
+
+```bash
+npm install -g mindigenous
+mindi
+```
+
+That's it. `mindi` launches the agentic coding terminal — on first run it walks you through setup and auto-detects existing API keys (OpenAI, Gemini, Anthropic, Groq, OpenRouter, and more).
+
+### Brand-new computer? (nothing installed — ONE command)
+
+On **Windows**, open PowerShell and paste this single line. It checks for Node.js, installs it if missing, installs mindigenous, and sets up your PATH — all automatically:
+
+```powershell
+irm https://unpkg.com/mindigenous/install.ps1 | iex
+```
+
+When it finishes, open a **new** PowerShell window and type `mindi`.
+
+Prefer to do it manually, or on another platform? If `npm` is "not recognized", the machine just needs Node.js first (npm comes with it). Copy-paste ONE line for your platform:
+
+**Windows** — open PowerShell and run:
+
+```powershell
+winget install OpenJS.NodeJS.LTS
+```
+
+**macOS** — open Terminal and run:
+
+```bash
+brew install node
+```
+
+(no Homebrew? download the macOS installer from [nodejs.org](https://nodejs.org) instead)
+
+**Ubuntu / Debian Linux**:
+
+```bash
+curl -fsSL https://deb.nodesource.com/setup_lts.x | sudo -E bash - && sudo apt install -y nodejs
+```
+
+Then:
+
+1. **Close and reopen the terminal** (so `npm` appears on PATH — this fixes "npm is not recognized").
+2. Verify with `node --version` — must print **v22** or newer.
+3. Run:
+
+```bash
+npm install -g mindigenous
+mindi
+```
+
+The terminal guides you through everything else (API keys, model selection) on first launch.
+
+To configure manually instead, set any one provider key:
+
+```bash
+# Linux / macOS
+export OPENAI_API_KEY=sk-...
+
+# Windows PowerShell
+$env:OPENAI_API_KEY="sk-..."
+```
+
+`OPENAI_BASE_URL` also works for any OpenAI-compatible gateway (Groq, Together, Fireworks, LM Studio, ...).
+
+### Advanced CLI
+
+A lower-level CLI ships alongside the terminal for scripting and diagnostics:
+
+```bash
+mindi-cli doctor                          # health-check all providers
+mindi-cli run "list files in this repo"   # one-shot prompt, streamed
+mindi-cli models                          # list models across providers
+mindi-cli graph "browse example.com"      # visualize the execution graph
+mindi-cli logs --follow                   # live runtime event stream
+```
+
+---
+
 ## What is MINDI Runtime?
 
 MINDI Runtime is a provider-agnostic augmentation runtime for Large Language Models.

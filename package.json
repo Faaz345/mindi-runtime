@@ -1,7 +1,7 @@
 {
-  "name": "mindi-runtime",
-  "version": "0.1.0",
-  "description": "Provider-agnostic augmentation runtime for Large Language Models. One runtime. Any model. Unified capabilities.",
+  "name": "mindigenous",
+  "version": "0.1.3",
+  "description": "Provider-agnostic agentic coding terminal. One runtime. Any model. Unified capabilities.",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -12,10 +12,26 @@
     }
   },
   "bin": {
-    "mindi": "dist/cli/index.js",
+    "mindi": "dist/terminal/index.js",
     "mindigenous": "dist/terminal/index.js",
-    "mindi-app": "dist/terminal/index.js"
+    "mindi-cli": "dist/cli/index.js"
   },
+  "files": [
+    "dist",
+    "README.md",
+    ".env.example",
+    "install.ps1",
+    "postinstall.cjs",
+    "mindigenous-lineart.svg"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Faaz345/mindi-runtime.git"
+  },
+  "homepage": "https://github.com/Faaz345/mindi-runtime#readme",
+  "unpkg": "install.ps1",
+  "bugs": "https://github.com/Faaz345/mindi-runtime/issues",
+  "author": "MOHAMMAD FAAZ SIDDIQUI <faaz.siddiqui345@gmail.com>",
   "scripts": {
     "build": "tsc",
     "dev": "tsx watch examples/basic-usage.ts",
@@ -25,11 +41,19 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "example": "tsx examples/basic-usage.ts",
-    "clean": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\""
+    "clean": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\"",
+    "postinstall": "node postinstall.cjs",
+    "prepublishOnly": "npm run clean && npm run build && npm test"
   },
   "keywords": [
     "ai",
     "llm",
+    "agent",
+    "agentic",
+    "coding-agent",
+    "terminal",
+    "cli",
+    "tui",
     "runtime",
     "augmentation",
     "capabilities",
