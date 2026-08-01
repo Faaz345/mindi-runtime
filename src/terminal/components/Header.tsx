@@ -9,18 +9,21 @@ import { COLORS } from "../colors.js";
 
 interface HeaderProps {
   providerId: string;
+  /** Human-readable provider name (displayName from config). Falls back to providerId. */
+  providerLabel?: string;
   modelId: string;
   sessionId: string;
   workspace: string;
   metrics: MetricsSnapshot;
 }
 
-export function Header({ providerId, modelId, sessionId, workspace, metrics }: HeaderProps): React.ReactElement {
+export function Header({ providerId, providerLabel, modelId, sessionId, workspace, metrics }: HeaderProps): React.ReactElement {
   const { columns } = useWindowSize();
 
   // Fixed segments.
   const brand = "MINDIGENOUS";
-  const model = `${providerId}/${modelId}`;
+  const providerName = providerLabel || providerId;
+  const model = `${providerName}/${modelId}`;
   const session = sessionId.slice(0, 8);
   const stats = `↑${metrics.requests.total} ◇${metrics.capabilities.total} ∑${metrics.tokensUsed}`;
 
@@ -39,7 +42,7 @@ export function Header({ providerId, modelId, sessionId, workspace, metrics }: H
       <Box gap={1}>
         <Text bold color={COLORS.header} wrap="truncate">{brand}</Text>
         <Text color={COLORS.dim}>│</Text>
-        <Text color={COLORS.azure} wrap="truncate">{providerId}</Text>
+        <Text color={COLORS.azure} wrap="truncate">{providerName}</Text>
         <Text color={COLORS.dim}>/</Text>
         <Text color={COLORS.white} wrap="truncate">{modelId}</Text>
         {showSession && (

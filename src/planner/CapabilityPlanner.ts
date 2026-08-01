@@ -34,6 +34,12 @@ export class CapabilityPlanner {
     private readonly registry: CapabilityRegistry,
     private readonly availabilityTracker?: CapabilityAvailabilityTracker,
     private readonly modelRegistry?: ModelCapabilityRegistry,
+    /**
+     * Optional check: can any configured provider handle this capability?
+     * When true, the capability is "missing" (augmentable via provider)
+     * rather than "unavailable". Wired by the Runtime to ProviderManager.selectFor.
+     */
+    private readonly providerCanHandle?: (type: CapabilityType) => boolean,
   ) {}
 
   async plan(
@@ -62,10 +68,18 @@ export class CapabilityPlanner {
 
       // Check if any executor is REGISTERED.
       if (!this.registry.has(type)) {
-        unavailable.push({
-          type,
-          reason: `No executor registered for capability "${type}"`,
-        });
+        // No tool executor — but a configured PROVIDER might handle it
+        // (e.g. vision via an OpenAI-compatible provider). The augmentation
+        // router will invoke the provider directly.
+        if (this.providerCanHandle?.(type)) {
+          const input = this.buildInput(type, request);
+          missing.push({ type, input, preferTool: false });
+        } else {
+          unavailable.push({
+            type,
+            reason: `No executor registered for capability "${type}"`,
+          });
+        }
         continue;
       }
 

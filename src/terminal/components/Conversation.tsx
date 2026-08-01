@@ -57,7 +57,7 @@ export const MessageView = React.memo(function MessageView({ message }: { messag
       : "";
     const displayContent = markImagePaths(message.content);
     return (
-      <Box flexDirection="column" marginTop={1}>
+      <Box flexDirection="column" marginTop={0}>
         <Box>
           <Text backgroundColor={COLORS.promptBg} color={COLORS.promptText} bold>
             {" › "}{attachNote}{displayContent}{" "}
@@ -71,11 +71,11 @@ export const MessageView = React.memo(function MessageView({ message }: { messag
       <Box flexDirection="column" marginTop={0}>
         {/* Persisted backend steps that produced this response. */}
         {message.activities && message.activities.length > 0 && (
-          <Box marginBottom={0} marginTop={1}>
+          <Box marginBottom={0}>
             <ActivityFeed items={message.activities} showSpinner={false} />
           </Box>
         )}
-        <Box flexDirection="row" gap={1} marginTop={message.activities && message.activities.length > 0 ? 0 : 0}>
+        <Box flexDirection="row" gap={1}>
           <Text color={COLORS.assistant} bold>{message.modelId || "assistant"}</Text>
           {message.durationMs !== undefined && message.durationMs > 0 && (
             <Text color={COLORS.timer}> {formatMs(message.durationMs)}</Text>

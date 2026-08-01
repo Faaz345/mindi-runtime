@@ -23,7 +23,10 @@ import { TokenRouterProvider } from "./tokenrouter/TokenRouterProvider.js";
  * Load providers from config and return instantiated IProvider instances.
  * Only enabled providers with an apiKey (or authMethod "none") are loaded.
  */
-export function loadProvidersFromConfig(config: ProvidersConfig): IProvider[] {
+export function loadProvidersFromConfig(
+  config: ProvidersConfig,
+  opts?: { primaryModel?: string },
+): IProvider[] {
   const providers: IProvider[] = [];
 
   for (const [id, rawEntry] of Object.entries(config)) {
@@ -34,7 +37,7 @@ export function loadProvidersFromConfig(config: ProvidersConfig): IProvider[] {
     if (!entry.apiKey && entry.authMethod !== "none") continue;
 
     try {
-      const provider = instantiateProvider(id, entry);
+      const provider = instantiateProvider(id, entry, opts);
       if (provider) providers.push(provider);
     } catch (err) {
       // Don't crash if one provider fails — log and continue.
@@ -46,7 +49,7 @@ export function loadProvidersFromConfig(config: ProvidersConfig): IProvider[] {
 }
 
 /** Instantiate a provider based on its type. */
-function instantiateProvider(id: string, entry: ProviderEntry): IProvider | null {
+function instantiateProvider(id: string, entry: ProviderEntry, opts?: { primaryModel?: string }): IProvider | null {
   switch (entry.type) {
     case "openai-compatible":
       // Use TokenRouterProvider for tokenrouter id, OpenAIProvider for others.
@@ -58,6 +61,7 @@ function instantiateProvider(id: string, entry: ProviderEntry): IProvider | null
           headers: entry.headers,
           timeoutMs: entry.timeoutMs,
           models: entry.models,
+          primaryModel: opts?.primaryModel,
         });
       }
       return new OpenAIProvider({

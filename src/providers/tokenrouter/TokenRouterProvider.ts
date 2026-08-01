@@ -17,6 +17,8 @@
  */
 
 import type {
+  CapabilityInput,
+  CapabilityResult,
   CapabilityType,
   ChatChunk,
   ChatRequest,
@@ -39,6 +41,8 @@ export interface TokenRouterProviderOptions {
   headers?: Record<string, string>;
   timeoutMs?: number;
   models?: Record<string, { capabilities: CapabilityType[]; contextWindow?: number }>;
+  /** The primary chat model configured by the user. Used as vision fallback. */
+  primaryModel?: string;
 }
 
 const DEFAULT_BASE_URL = "https://api.tokenrouter.com/v1";
@@ -46,7 +50,7 @@ const DEFAULT_BASE_URL = "https://api.tokenrouter.com/v1";
 export class TokenRouterProvider extends BaseProvider {
   readonly id = "tokenrouter";
   readonly label: string;
-  protected readonly providerCapabilities: ReadonlySet<CapabilityType> = new Set([Cap.Chat]);
+  protected readonly providerCapabilities: ReadonlySet<CapabilityType> = new Set([Cap.Chat, Cap.Vision]);
   protected readonly opts: Required<TokenRouterProviderOptions>;
 
   constructor(opts: TokenRouterProviderOptions) {
@@ -57,6 +61,7 @@ export class TokenRouterProvider extends BaseProvider {
       headers: {},
       timeoutMs: 60_000,
       models: {},
+      primaryModel: "",
       ...opts,
     };
     this.label = this.opts.displayName;
@@ -181,13 +186,12 @@ export class TokenRouterProvider extends BaseProvider {
       body.stop = request.stop;
     }
 
-    // No timeout on chat — let the stream run until the model finishes.
-    // The user can Ctrl+C to interrupt.
+    // Connection timeout — stream idle is handled by Runtime's streamChatTurn.
     const res = await this.http(url, {
       method: "POST",
       headers: this.headers(),
       body: JSON.stringify(body),
-      timeoutMs: 0, // 0 = no timeout
+      timeoutMs: 60_000,
     }, ctx);
 
     if (!res.body) {
@@ -261,6 +265,150 @@ export class TokenRouterProvider extends BaseProvider {
     }
     return h;
   }
+
+  // ---- Vision capability (Capability Augmentation Router) ----
+
+  async executeCapability(
+    type: CapabilityType,
+    input: CapabilityInput,
+    ctx: ExecutionContext,
+  ): Promise<CapabilityResult> {
+    if (type === Cap.Vision) {
+      return this.vision(input, ctx);
+    }
+    return super.executeCapability(type, input, ctx);
+  }
+
+  /**
+   * Native vision — send image+prompt to a vision-capable model.
+   * Uses the same OpenAI-compatible chat completions endpoint with
+   * multimodal content parts.
+   */
+  private async vision(
+    input: CapabilityInput,
+    ctx: ExecutionContext,
+  ): Promise<CapabilityResult> {
+    const start = Date.now();
+    const prompt = String(input.params.prompt ?? "Analyze this image in detail.");
+    const image = String(input.params.image ?? ""); // base64 data URI or URL
+
+    // Resolve a vision-capable model.
+    let model = typeof input.params.model === "string" ? input.params.model : "";
+    if (!model || model === this.id || model === this.opts.displayName) {
+      model = (await this.resolveVisionModel()) ?? "";
+    }
+    if (!model) {
+      return {
+        type: Cap.Vision,
+        source: this.id,
+        ok: false,
+        payload: { kind: "text", text: "" },
+        error: `No vision-capable model available on provider "${this.id}". The model list returned no multimodal models.`,
+        durationMs: Date.now() - start,
+      };
+    }
+
+    const url = `${this.opts.baseUrl}/chat/completions`;
+    const visionBody: Record<string, unknown> = {
+      model,
+      messages: [
+        {
+          role: "user",
+          content: [
+            { type: "text", text: prompt },
+            { type: "image_url", image_url: { url: image } },
+          ],
+        },
+      ],
+      max_tokens: 2000,
+      stream: false,
+    };
+
+    try {
+      const res = await this.http(url, {
+        method: "POST",
+        headers: this.headers(),
+        body: JSON.stringify(visionBody),
+        timeoutMs: 90_000, // Vision analysis can be slow on free models.
+      }, ctx);
+      const data = (await res.json()) as {
+        choices: Array<{ message: { content: string } }>;
+        usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number };
+      };
+      return {
+        type: Cap.Vision,
+        source: this.id,
+        ok: true,
+        payload: { kind: "text", text: data.choices[0]?.message?.content ?? "" },
+        usage: {
+          promptTokens: data.usage?.prompt_tokens,
+          completionTokens: data.usage?.completion_tokens,
+          totalTokens: data.usage?.total_tokens,
+        },
+        durationMs: Date.now() - start,
+      };
+    } catch (err) {
+      return {
+        type: Cap.Vision,
+        source: this.id,
+        ok: false,
+        payload: { kind: "text", text: "" },
+        error: err instanceof Error ? err.message : String(err),
+        durationMs: Date.now() - start,
+      };
+    }
+  }
+
+  /**
+   * Resolve a vision-capable model from this provider's model list.
+   * Prefers free-tier variants (":free" / "-free" suffix) to avoid burning
+   * paid quota on augmentation. Cached for 5 minutes.
+   *
+   * Fallback chain:
+   *   1. Explicitly vision-capable models from /models
+   *   2. The configured primary model (many aggregator models support vision
+   *      without declaring it in metadata)
+   *   3. null (genuinely no vision available)
+   */
+  private visionModelCache: { model: string | null; expiresAt: number } | null = null;
+  private async resolveVisionModel(): Promise<string | null> {
+    if (this.visionModelCache && this.visionModelCache.expiresAt > Date.now()) {
+      return this.visionModelCache.model;
+    }
+    try {
+      const models = await this.listModels();
+      const visionModels = models.filter((m) => m.capabilities.includes(Cap.Vision));
+      if (visionModels.length > 0) {
+        // Prefer free-tier variants first.
+        const free = visionModels.find((m) => m.id.includes("free"));
+        const picked = (free ?? visionModels[0]!).id;
+        this.visionModelCache = { model: picked, expiresAt: Date.now() + 5 * 60 * 1000 };
+        return picked;
+      }
+      // No explicitly vision-capable models found. Fall back to the primary
+      // model — on aggregators, many models support vision without declaring it.
+      if (this.opts.primaryModel) {
+        this.visionModelCache = { model: this.opts.primaryModel, expiresAt: Date.now() + 5 * 60 * 1000 };
+        return this.opts.primaryModel;
+      }
+      // Last resort: if models were returned but none matched, try the first one.
+      if (models.length > 0) {
+        const picked = models[0]!.id;
+        this.visionModelCache = { model: picked, expiresAt: Date.now() + 5 * 60 * 1000 };
+        return picked;
+      }
+      this.visionModelCache = { model: null, expiresAt: Date.now() + 5 * 60 * 1000 };
+      return null;
+    } catch {
+      // /models endpoint failed — fall back to primary model.
+      if (this.opts.primaryModel) {
+        this.visionModelCache = { model: this.opts.primaryModel, expiresAt: Date.now() + 5 * 60 * 1000 };
+        return this.opts.primaryModel;
+      }
+      this.visionModelCache = { model: null, expiresAt: Date.now() + 5 * 60 * 1000 };
+      return null;
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -292,6 +440,19 @@ function normalizeContent(content: import("../../core/types.js").ChatContent): u
 // SSE stream parser (OpenAI-compatible format)
 // ---------------------------------------------------------------------------
 
+/** Race a promise against an AbortSignal to interrupt stalled reads. */
+function raceAbort<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
+  if (signal.aborted) return Promise.reject(new DOMException("Aborted", "AbortError"));
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => reject(new DOMException("Aborted", "AbortError"));
+    signal.addEventListener("abort", onAbort, { once: true });
+    promise.then(
+      (v) => { signal.removeEventListener("abort", onAbort); resolve(v); },
+      (e) => { signal.removeEventListener("abort", onAbort); reject(e); },
+    );
+  });
+}
+
 async function* parseSSEStream(
   body: ReadableStream<Uint8Array>,
   ctx: ExecutionContext,
@@ -311,14 +472,11 @@ async function* parseSSEStream(
       let done = false;
       let value: Uint8Array | undefined;
       try {
-        const result = await reader.read();
+        const result = await raceAbort(reader.read(), ctx.signal);
         done = result.done;
         value = result.value as Uint8Array;
       } catch {
-        // Connection terminated (ERR_STREAM_PREMATURE_CLOSE, "terminated", etc.)
-        // This happens when the server closes the connection after sending
-        // all content but before sending [DONE].
-        // Emit a done so the Runtime keeps whatever was streamed.
+        // Connection terminated or aborted (ERR_STREAM_PREMATURE_CLOSE, timeout, etc.)
         break;
       }
       if (done) break;

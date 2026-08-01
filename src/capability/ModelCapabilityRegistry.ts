@@ -261,7 +261,8 @@ export class ModelCapabilityRegistry {
   private store(profile: ModelCapabilityProfile): void {
     this.profiles.set(profile.id, profile);
     this.cache?.set(profile);
-    this.cache?.save();
+    // Phase 8: Don't save to disk on every profile update. The refresh()
+    // method calls cache.save() once at the end, batching all changes.
   }
 }
 

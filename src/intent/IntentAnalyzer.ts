@@ -41,9 +41,14 @@ export class IntentAnalyzer {
     // OCR — text extraction from images / scans
     { capability: Cap.OCR, pattern: /\bocr|extract text from|scan(ned)?|handwriting|read text in (this|the) (image|scan|photo)|transcribe (this|the) (image|scan|document)\b/i, weight: 0.9, reason: "OCR/extraction language" },
     { capability: Cap.OCR, pattern: /\.pdf$/i, weight: 0.6, reason: "PDF often needs OCR" },
-    // Web search
-    { capability: Cap.WebSearch, pattern: /\b(search|google|look up|find (out|info|information)|latest|current|news|today|recent|now|who (is|are)|what('?s| is)|when (did|was)|how (do|does|to)|where (is|are))\b/i, weight: 0.5, reason: "search/current-events language" },
+    // Web search — only strong freshness/real-time signals should trigger alone.
+    // Generic question words ("what is", "who is") are weak signals that need
+    // corroboration from freshness language to cross the threshold.
+    { capability: Cap.WebSearch, pattern: /\b(search|google|look up|find (out|info|information))\b/i, weight: 0.6, reason: "explicit search verb" },
+    { capability: Cap.WebSearch, pattern: /\b(latest|current|news|today|recent|now|happening)\b/i, weight: 0.55, reason: "freshness language" },
     { capability: Cap.WebSearch, pattern: /\b(real[- ]?time|up[- ]?to[- ]?date|as of|happening now|breaking|stock price|weather|score)\b/i, weight: 0.8, reason: "real-time/freshness language" },
+    // Weak question-word signal — only contributes when combined with other signals.
+    { capability: Cap.WebSearch, pattern: /\b(who (is|are)|when (did|was)|where (is|are))\b/i, weight: 0.35, reason: "factual question (weak)" },
     // Browser automation
     { capability: Cap.Browser, pattern: /\b(open (this|the) (page|site|website|url|link)|navigate|browse|click (on|the)|scrape|crawl|page source|dom|webpage|web page|fill (in|out) (the )?form)\b/i, weight: 0.85, reason: "browser/navigation language" },
     { capability: Cap.Browser, pattern: /^https?:\/\//i, weight: 0.7, reason: "URL in input" },
@@ -107,6 +112,20 @@ export class IntentAnalyzer {
     const searchSignal = byCap.get(Cap.WebSearch);
     if (visionSignal && visionSignal.weight >= 0.8 && searchSignal && searchSignal.weight <= 0.5) {
       byCap.delete(Cap.WebSearch);
+    }
+
+    // Suppress web-search for simple questions that don't need real-time data.
+    // Heuristic: short input (< 80 chars), no URLs, no freshness language,
+    // and the search signal is weak (<= 0.55) → it's a knowledge question, not
+    // a search query. "What is 2+2?", "Explain recursion", "How does DNS work?"
+    if (searchSignal && searchSignal.weight <= 0.55) {
+      const isShort = input.trim().length < 80;
+      const hasUrl = /https?:\/\//i.test(input);
+      const hasFreshness = /\b(latest|current|news|today|recent|now|real[- ]?time|up[- ]?to[- ]?date|breaking|stock|weather|score)\b/i.test(input);
+      const hasSearchVerb = /\b(search|google|look up|find (out|info|information))\b/i.test(input);
+      if (isShort && !hasUrl && !hasFreshness && !hasSearchVerb) {
+        byCap.delete(Cap.WebSearch);
+      }
     }
 
     const requiredCapabilities = Array.from(byCap.values())

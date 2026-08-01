@@ -205,6 +205,13 @@ const VISION_PATTERNS = [
   /multimodal/,
   /(^|[-_])mm([-_:.]|$)/,          // *-mm-*
   /\bimage\+text\b/,
+  /kimi/,                          // moonshotai/kimi-k3, kimi-vl
+  /moonshot/,                      // moonshotai/*
+  /glm-4v/,                        // zhipu glm-4v (vision variant)
+  /yi-vision/,                     // 01-ai yi-vision
+  /step-1v/,                       // stepfun step-1v
+  /emu/,                           // baa-emu (multimodal)
+  /cogagent/,                      // thudm cogagent (GUI vision)
 ];
 
 const AUDIO_INPUT_PATTERNS = [/whisper/, /speech/, /audio/, /voice/, /asr/, /transcribe/];
@@ -308,16 +315,29 @@ function emptyProfile(provider: string, model: string): ModelCapabilityProfile {
 }
 
 function finalize(p: ModelCapabilityProfile, extraNative?: CapabilityType[]): void {
-  // Chat models modern enough to matter support tool calling + JSON by default.
-  if (p.chat && !p.toolCalling) {
-    p.toolCalling = true;
-    p.functionCalling = true;
-  }
-  if (p.chat && p.toolCalling && !p.supportsJSON) p.supportsJSON = true;
+  // IMPORTANT: Do NOT blanket-assume tool calling for all chat models.
+  // Many models (smaller, older, or provider-limited) do NOT support tools.
+  // Tool calling is only set when:
+  //   1. API metadata declares it (supportedParameters includes "tools")
+  //   2. Provider declaration bridges it (decl.toolCalling)
+  //   3. Heuristic detects a code/modern model family
+  //   4. Manual override registers it
+  //
+  // The old behavior (if chat → assume toolCalling) caused the runtime to
+  // attach native tool definitions to models that cannot use them, leading
+  // to silent failures and hallucinated tool calls.
+
+  // Consistency: functionCalling implies toolCalling and vice versa.
+  if (p.functionCalling && !p.toolCalling) p.toolCalling = true;
   if (p.toolCalling && !p.functionCalling) p.functionCalling = true;
+
+  // JSON mode is only guaranteed with structured output support.
+  if (p.structuredOutput && !p.supportsJSON) p.supportsJSON = true;
+
+  // Vision implies image support.
   if (p.vision && !p.supportsImages) p.supportsImages = true;
 
-  // Derive native capability types from the boolean flags.
+  // Derive native capability types from the VERIFIED boolean flags.
   const native = new Set<CapabilityType>(extraNative ?? []);
   if (p.chat) native.add(Cap.Chat);
   if (p.vision) native.add(Cap.Vision);

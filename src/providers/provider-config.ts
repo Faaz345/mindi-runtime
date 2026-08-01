@@ -90,20 +90,44 @@ export const DEFAULT_RETRY_POLICY: ProviderRetryPolicy = {
   retryableErrors: ["E_PROVIDER_TIMEOUT", "E_PROVIDER_RATE_LIMIT", "E_PROVIDER_UNAVAILABLE"],
 };
 
-/** Known provider type defaults (baseUrl, etc.) for common providers. */
+/**
+ * Well-known provider presets shown in the setup wizard.
+ * Ordered by popularity — these are the providers a user would recognize.
+ * Internal/aggregator providers (TokenRouter, OpenRouter, etc.) are NOT
+ * listed here; they are configured via the "Custom Provider" option.
+ */
 export const PROVIDER_DEFAULTS: Record<string, Partial<ProviderEntry>> = {
   openai: { type: "openai-compatible", baseUrl: "https://api.openai.com/v1", displayName: "OpenAI" },
-  tokenrouter: { type: "openai-compatible", baseUrl: "https://api.tokenrouter.com/v1", displayName: "TokenRouter" },
-  openrouter: { type: "openai-compatible", baseUrl: "https://openrouter.ai/api/v1", displayName: "OpenRouter" },
-  groq: { type: "openai-compatible", baseUrl: "https://api.groq.com/openai/v1", displayName: "Groq" },
+  anthropic: { type: "openai-compatible", baseUrl: "https://api.anthropic.com/v1", displayName: "Anthropic" },
+  gemini: { type: "gemini", baseUrl: "https://generativelanguage.googleapis.com/v1beta", displayName: "Google Gemini" },
   deepseek: { type: "openai-compatible", baseUrl: "https://api.deepseek.com/v1", displayName: "DeepSeek" },
+  groq: { type: "openai-compatible", baseUrl: "https://api.groq.com/openai/v1", displayName: "Groq" },
+  mistral: { type: "openai-compatible", baseUrl: "https://api.mistral.ai/v1", displayName: "Mistral AI" },
+  ollama: { type: "openai-compatible", baseUrl: "http://localhost:11434/v1", displayName: "Ollama (local)", authMethod: "none" },
+  lmstudio: { type: "openai-compatible", baseUrl: "http://localhost:1234/v1", displayName: "LM Studio (local)", authMethod: "none" },
+  // Internal/aggregator providers (not shown in wizard, but resolvable by id)
+  tokenrouter: { type: "openai-compatible", baseUrl: "https://api.tokenrouter.com/v1", displayName: "MINDI Cloud" },
+  openrouter: { type: "openai-compatible", baseUrl: "https://openrouter.ai/api/v1", displayName: "OpenRouter" },
   together: { type: "openai-compatible", baseUrl: "https://api.together.xyz/v1", displayName: "Together AI" },
   fireworks: { type: "openai-compatible", baseUrl: "https://api.fireworks.ai/inference/v1", displayName: "Fireworks AI" },
-  ollama: { type: "openai-compatible", baseUrl: "http://localhost:11434/v1", displayName: "Ollama", authMethod: "none" },
-  lmstudio: { type: "openai-compatible", baseUrl: "http://localhost:1234/v1", displayName: "LM Studio", authMethod: "none" },
   azure: { type: "openai-compatible", displayName: "Azure OpenAI" },
-  gemini: { type: "gemini", baseUrl: "https://generativelanguage.googleapis.com/v1beta", displayName: "Google Gemini" },
 };
+
+/**
+ * The ordered list of providers shown in the setup wizard UI.
+ * Well-known providers first, then a "Custom Provider" option at the bottom.
+ */
+export const WIZARD_PROVIDER_LIST: Array<{ id: string; label: string; description: string }> = [
+  { id: "openai", label: "OpenAI", description: "GPT-4o, GPT-4, o1, o3" },
+  { id: "anthropic", label: "Anthropic", description: "Claude 4, Claude 3.5 Sonnet" },
+  { id: "gemini", label: "Google Gemini", description: "Gemini 2.5 Pro, Flash" },
+  { id: "deepseek", label: "DeepSeek", description: "DeepSeek-V3, DeepSeek-R1" },
+  { id: "groq", label: "Groq", description: "Ultra-fast inference (Llama, Mixtral)" },
+  { id: "mistral", label: "Mistral AI", description: "Mistral Large, Codestral" },
+  { id: "ollama", label: "Ollama (local)", description: "Run models locally, no API key needed" },
+  { id: "lmstudio", label: "LM Studio (local)", description: "Local server, no API key needed" },
+  { id: "custom", label: "Custom Provider", description: "Any OpenAI-compatible API (base URL + key)" },
+];
 
 // ---------------------------------------------------------------------------
 // Config Resolution

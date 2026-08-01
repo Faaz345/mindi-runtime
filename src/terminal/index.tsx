@@ -6,9 +6,11 @@
  *
  * Flow:
  *   1. Fade-in clear (cool effect)
- *   2. Silent health check
- *   3. If healthy → startup animation → boot → terminal
- *   4. If not healthy → onboarding (with API key auto-detection) → terminal
+ *   2. Workspace trust (first gate — auto-skips if already trusted)
+ *   3. Silent health check
+ *   4. If healthy → startup animation → boot → session restore → terminal
+ *   5. If config missing → onboarding → startup → boot → terminal
+ *   6. If config broken → repair flow → startup → boot → terminal
  *
  * The user never has to run another command. Everything happens inside
  * this single process.
@@ -20,7 +22,7 @@ import { StartupAnimation } from "./StartupAnimation.js";
 import { BootSequence } from "./BootSequence.js";
 import { Terminal } from "./Terminal.js";
 import { OnboardingFlow } from "./OnboardingFlow.js";
-import { WorkspaceTrust, trustWorkspace } from "./WorkspaceTrust.js";
+import { WorkspaceTrust } from "./WorkspaceTrust.js";
 import { SessionPicker, resumableSessions } from "./SessionPicker.js";
 import { silentHealthCheck } from "../cli/health-check.js";
 import { loadEnvFile, bootRuntime } from "../cli/runtime-loader.js";
@@ -31,7 +33,10 @@ import type { OnboardingConfig } from "../cli/onboarding-config.js";
 import { messageFromChat, type Message } from "./types.js";
 import type { SessionSummary } from "../workspace/types.js";
 
-type Phase = "fade-in" | "health-check" | "onboarding" | "workspace-trust" | "startup" | "boot" | "session-select" | "terminal" | "error";
+type Phase = "fade-in" | "workspace-trust" | "health-check" | "onboarding" | "repair" | "startup" | "boot" | "session-select" | "terminal" | "error";
+
+/** CLI flag: `mindi --pick` forces the session picker on startup. */
+const forcePick = process.argv.includes("--pick") || process.argv.includes("--session-select");
 
 function App(): React.ReactElement {
   const [phase, setPhase] = useState<Phase>("fade-in");
@@ -40,8 +45,17 @@ function App(): React.ReactElement {
   const [providerId, setProviderId] = useState<string>("");
   const [modelId, setModelId] = useState<string>("");
   const [restoredMessages, setRestoredMessages] = useState<Message[]>([]);
+  const [restoredTimeline, setRestoredTimeline] = useState<import("../workspace/types.js").ExecutionEvent[]>([]);
   const [recentSessions, setRecentSessions] = useState<SessionSummary[]>([]);
   const [fadeStep, setFadeStep] = useState(0);
+
+  // Phase 8: Flush debounced writes on process exit so no data is lost.
+  useEffect(() => {
+    if (!runtime) return;
+    const onExit = () => runtime.dispose();
+    process.on("exit", onExit);
+    return () => { process.off("exit", onExit); };
+  }, [runtime]);
 
   // ---- Phase 0: Cool fade-in effect ----
   useEffect(() => {
@@ -63,13 +77,18 @@ function App(): React.ReactElement {
         i++;
       } else {
         clearInterval(timer);
-        setPhase("health-check");
+        // Trust is ALWAYS checked first — before health-check or onboarding.
+        setPhase("workspace-trust");
       }
     }, 60);
     return () => clearInterval(timer);
   }, [phase]);
 
-  // ---- Phase 1: Silent health check ----
+  // ---- Phase 1: Workspace trust (first gate) ----
+  // WorkspaceTrust auto-skips if already trusted (calls onTrust immediately).
+  // Once trusted, proceed to health-check.
+
+  // ---- Phase 2: Silent health check ----
   useEffect(() => {
     if (phase !== "health-check") return;
     loadEnvFile();
@@ -78,11 +97,14 @@ function App(): React.ReactElement {
         try {
           const rt = bootRuntime(toRuntimeConfig(result.config));
           setRuntime(rt);
-           setRecentSessions(resumableSessions(rt.workspace?.sessionManager.listSessions() ?? []));
-          setPhase("workspace-trust");
+          setRecentSessions(resumableSessions(rt.workspace?.sessionManager.listSessions() ?? []));
+          setPhase("startup");
         } catch {
           setPhase("onboarding");
         }
+      } else if (result.issue && result.config && result.issue.type !== "no-config" && result.issue.type !== "not-onboarded") {
+        // Config exists + onboarded but provider has an issue → repair flow.
+        setPhase("repair");
       } else {
         setPhase("onboarding");
       }
@@ -92,14 +114,12 @@ function App(): React.ReactElement {
   // ---- Phase 4: Onboarding complete ----
   const handleOnboardingComplete = useCallback((config: OnboardingConfig) => {
     // The user just explicitly configured MINDIGENOUS in this directory —
-    // trust it implicitly and go straight to the startup animation instead
-    // of showing a second, redundant trust prompt (which looked like a hang).
+    // trust is already granted (Step 1 ran before onboarding).
     const boot = async (): Promise<Runtime> => {
       loadEnvFile();
       const rt = bootRuntime(toRuntimeConfig(config));
       setRuntime(rt);
       setRecentSessions(resumableSessions(rt.workspace?.sessionManager.listSessions() ?? []));
-      trustWorkspace(process.cwd());
       setPhase("startup");
       return rt;
     };
@@ -129,6 +149,7 @@ function App(): React.ReactElement {
     setModelId(restored.effectiveModelId);
     const history = runtime.workspace?.sessionManager.recall(id) ?? restored.session.messages;
     setRestoredMessages(history.map(messageFromChat));
+    setRestoredTimeline(restored.session.timeline ?? []);
     setPhase("terminal");
   }, [runtime]);
 
@@ -151,6 +172,7 @@ function App(): React.ReactElement {
       setModelId(runtime.config.defaultModel);
     }
     setRestoredMessages([]);
+    setRestoredTimeline([]);
     setPhase("terminal");
   }, [runtime]);
 
@@ -171,6 +193,10 @@ function App(): React.ReactElement {
     );
   }
 
+  if (phase === "workspace-trust") {
+    return <WorkspaceTrust workspace={process.cwd()} onTrust={() => setPhase("health-check")} />;
+  }
+
   if (phase === "health-check") {
     return (
       <Box flexDirection="column" alignItems="center" justifyContent="center">
@@ -183,8 +209,8 @@ function App(): React.ReactElement {
     return <OnboardingFlow onComplete={handleOnboardingComplete} />;
   }
 
-  if (phase === "workspace-trust") {
-    return <WorkspaceTrust workspace={process.cwd()} onTrust={() => setPhase("startup")} />;
+  if (phase === "repair") {
+    return <OnboardingFlow onComplete={handleOnboardingComplete} repair />;
   }
 
   if (phase === "startup") {
@@ -193,8 +219,33 @@ function App(): React.ReactElement {
 
   if (phase === "boot") {
     return <BootSequence onDone={() => {
-      if (recentSessions.length > 0) setPhase("session-select");
-      else void startNewSession();
+      // Phase 6: Seamless auto-restore. Skip the session picker unless the
+      // user explicitly passed --pick or workspace settings disable autoRestore.
+      const wsSettings = runtime?.workspace?.store.readWorkspace().settings;
+      const autoRestore = wsSettings?.autoRestore !== false; // default true
+      if (!forcePick && autoRestore && runtime) {
+        // Auto-restore the last active session (or create one) — no prompt.
+        void runtime.restoreWorkspace().then((result) => {
+          if (result) {
+            setSessionId(result.session.id);
+            setProviderId(result.effectiveProviderId);
+            setModelId(result.effectiveModelId);
+            const history = runtime.workspace?.sessionManager.recall(result.session.id) ?? result.session.messages;
+            setRestoredMessages(history.map(messageFromChat));
+            setRestoredTimeline(result.session.timeline ?? []);
+            setPhase("terminal");
+          } else {
+            // No workspace — fall back to a fresh in-memory session.
+            void startNewSession();
+          }
+        }).catch(() => {
+          void startNewSession();
+        });
+      } else if (recentSessions.length > 0) {
+        setPhase("session-select");
+      } else {
+        void startNewSession();
+      }
     }} />;
   }
 
@@ -211,15 +262,17 @@ function App(): React.ReactElement {
         modelId={modelId || runtime.config.defaultModel}
         workspace={process.cwd()}
         restoredMessages={restoredMessages}
-         onSwitchSession={(id) => {
-           setSessionId(id);
-           const record = runtime.workspace?.sessionManager.get(id);
-           if (record) {
-             setProviderId(record.providerId);
-             setModelId(record.modelId);
-           }
-           const history = runtime.workspace?.sessionManager.recall(id) ?? [];
-           setRestoredMessages(history.map(messageFromChat));
+        restoredTimeline={restoredTimeline}
+        onSwitchSession={(id) => {
+          setSessionId(id);
+          const record = runtime.workspace?.sessionManager.get(id);
+          if (record) {
+            setProviderId(record.providerId);
+            setModelId(record.modelId);
+            setRestoredTimeline(record.timeline ?? []);
+          }
+          const history = runtime.workspace?.sessionManager.recall(id) ?? [];
+          setRestoredMessages(history.map(messageFromChat));
         }}
       />
     );

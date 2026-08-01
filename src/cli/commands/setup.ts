@@ -33,6 +33,7 @@ import {
 } from "../format.js";
 import type { CapabilityType, ProviderModel, IProvider } from "../../index.js";
 import { CapabilityTypes as Caps, OpenAIProvider, GeminiProvider } from "../../index.js";
+import { WIZARD_PROVIDER_LIST, PROVIDER_DEFAULTS } from "../../providers/provider-config.js";
 
 interface CapabilityMeta {
   type: CapabilityType;
@@ -95,47 +96,68 @@ export async function setupCommand(opts: SetupOptions): Promise<void> {
   if (envOpenAIKey) info(`Detected OPENAI_API_KEY in environment (${envOpenAIKey.slice(0, 8)}...)`);
   if (envGeminiKey) info(`Detected GEMINI_API_KEY in environment (${envGeminiKey.slice(0, 8)}...)`);
 
-  // ---- Step 2: Collect API keys ----
+  // ---- Step 2: Select provider + collect API key ----
   stepNum++;
   step(stepNum, totalSteps, "Configuring providers");
   const config = existingConfig ?? createEmptyConfig();
 
-  let openaiKey = opts.openaiKey || envOpenAIKey;
-  let baseUrl = opts.baseUrl || process.env.OPENAI_BASE_URL || "https://api.openai.com/v1";
+  let selectedProviderId = "";
+  let apiKey = "";
+  let baseUrl = "";
+  let providerDisplayName = "";
 
   if (!opts.nonInteractive) {
-    if (!openaiKey) {
-      const wantOpenAI = await promptConfirm("Configure an OpenAI-compatible provider?", true);
-      if (wantOpenAI) {
-        openaiKey = await promptPassword("Enter your OpenAI API key", {
+    // Show the provider selection list
+    const providerChoices = WIZARD_PROVIDER_LIST.map((p) => ({
+      label: p.label,
+      value: p.id,
+      description: p.description,
+    }));
+    selectedProviderId = await promptSelect("Select your AI provider", providerChoices, {
+      default: "openai",
+    });
+
+    if (selectedProviderId === "custom") {
+      // Custom provider: collect base URL, API key, and display name
+      providerDisplayName = await promptText("Provider display name", { default: "My Provider" });
+      baseUrl = await promptText("API base URL (OpenAI-compatible)", {
+        validate: (v) => !v.startsWith("http") ? "Must start with http:// or https://" : null,
+      });
+      apiKey = await promptPassword("API key", {
+        validate: (v) => v.length < 5 ? "Key seems too short" : null,
+      });
+    } else {
+      // Well-known provider
+      const defaults = PROVIDER_DEFAULTS[selectedProviderId] ?? {};
+      providerDisplayName = defaults.displayName ?? selectedProviderId;
+      baseUrl = defaults.baseUrl ?? "";
+
+      if (defaults.authMethod === "none") {
+        // Local providers (Ollama, LM Studio) — no key needed
+        info(`${providerDisplayName} is a local provider — no API key required.`);
+        const customUrl = await promptText("Server URL", { default: baseUrl });
+        baseUrl = customUrl || baseUrl;
+        apiKey = "local";
+      } else {
+        apiKey = await promptPassword(`Enter your ${providerDisplayName} API key`, {
           validate: (v) => v.length < 10 ? "Key seems too short" : null,
         });
-        if (openaiKey) {
-          const customBaseUrl = await promptText("Base URL (Enter for default)", { default: baseUrl });
-          baseUrl = customBaseUrl || baseUrl;
+        if (selectedProviderId === "openai") {
+          const customUrl = await promptText("Base URL (Enter for default)", { default: baseUrl });
+          baseUrl = customUrl || baseUrl;
         }
       }
-    } else {
-      info("Using OPENAI_API_KEY from environment.");
     }
+  } else {
+    // Non-interactive mode
+    selectedProviderId = opts.provider || "openai";
+    apiKey = opts.openaiKey || process.env.OPENAI_API_KEY || "";
+    baseUrl = opts.baseUrl || process.env.OPENAI_BASE_URL || PROVIDER_DEFAULTS[selectedProviderId]?.baseUrl || "";
+    providerDisplayName = PROVIDER_DEFAULTS[selectedProviderId]?.displayName ?? selectedProviderId;
   }
 
-  let geminiKey = opts.geminiKey || envGeminiKey;
-  if (!opts.nonInteractive) {
-    if (!geminiKey) {
-      const wantGemini = await promptConfirm("Configure Google Gemini?", false);
-      if (wantGemini) {
-        geminiKey = await promptPassword("Enter your Gemini API key", {
-          validate: (v) => v.length < 10 ? "Key seems too short" : null,
-        });
-      }
-    } else {
-      info("Using GEMINI_API_KEY from environment.");
-    }
-  }
-
-  if (!openaiKey && !geminiKey) {
-    warn("No API keys provided. Runtime will start with tools only.");
+  if (!apiKey) {
+    warn("No API key provided. Runtime will start with tools only.");
     config.onboarded = true;
     config.primaryProvider = "none";
     config.primaryModel = "none";
@@ -144,62 +166,55 @@ export async function setupCommand(opts: SetupOptions): Promise<void> {
     return;
   }
 
-  // ---- Step 3: Validate keys + discover models ----
+  // Store the provider in config
+  const providerType = selectedProviderId === "gemini" ? "gemini" : "openai-compatible";
+  config.providers[selectedProviderId] = {
+    type: providerType as "openai-compatible" | "gemini",
+    displayName: providerDisplayName,
+    baseUrl: baseUrl || undefined,
+    apiKey,
+    authMethod: PROVIDER_DEFAULTS[selectedProviderId]?.authMethod ?? "bearer",
+  };
+
+  // ---- Step 3: Validate key + discover models ----
   stepNum++;
-  step(stepNum, totalSteps, "Validating API keys + discovering models");
+  step(stepNum, totalSteps, "Validating API key + discovering models");
   const validationResults: ValidationResult[] = [];
 
-  if (openaiKey) {
-    process.stdout.write(`  ${icons.info} Validating OpenAI key... `);
-    const result = await validateOpenAIKey(openaiKey, baseUrl);
-    if (result.valid) {
-      process.stdout.write(`${icons.ok} ${colors.green("valid")} (${result.models?.length ?? 0} models)\n`);
-      config.providers.openai = { type: "openai-compatible", apiKey: openaiKey, baseUrl, orgId: "" };
-    } else {
-      process.stdout.write(`${icons.fail} ${colors.red("invalid")}\n`);
-      error(`OpenAI: ${result.error}`);
-    }
-    validationResults.push(result);
+  process.stdout.write(`  ${icons.info} Validating ${providerDisplayName} key... `);
+  let result: ValidationResult;
+  if (selectedProviderId === "gemini") {
+    result = await validateGeminiKey(apiKey);
+  } else {
+    result = await validateOpenAIKey(apiKey, baseUrl || undefined);
   }
 
-  if (geminiKey) {
-    process.stdout.write(`  ${icons.info} Validating Gemini key... `);
-    const result = await validateGeminiKey(geminiKey);
-    if (result.valid) {
-      process.stdout.write(`${icons.ok} ${colors.green("valid")} (${result.models?.length ?? 0} models)\n`);
-      config.providers.gemini = { type: "gemini", apiKey: geminiKey };
-    } else {
-      process.stdout.write(`${icons.fail} ${colors.red("invalid")}\n`);
-      error(`Gemini: ${result.error}`);
-    }
-    validationResults.push(result);
-  }
-
-  const validResults = validationResults.filter((r) => r.valid);
-  if (validResults.length === 0) {
-    error("No valid API keys. Cannot proceed with model selection.");
-    warn("Check your API keys and try again with `mindi-cli setup`.");
+  if (result.valid) {
+    process.stdout.write(`${icons.ok} ${colors.green("valid")} (${result.models?.length ?? 0} models)\n`);
+  } else {
+    process.stdout.write(`${icons.fail} ${colors.red("invalid")}\n`);
+    error(`${providerDisplayName}: ${result.error}`);
+    warn("Check your API key and try again with `mindi-cli setup`.");
     return;
   }
+  result.provider = selectedProviderId;
+  validationResults.push(result);
 
   // ---- Step 4: Select primary model ----
   stepNum++;
   step(stepNum, totalSteps, "Selecting primary reasoning model");
 
   const allModels: Array<ProviderModel & { providerId: string }> = [];
-  for (const result of validResults) {
-    const chatModels = filterChatModels(result.models ?? []);
-    for (const m of chatModels) {
-      allModels.push({ ...m, providerId: result.provider });
-    }
+  const chatModels = filterChatModels(result.models ?? []);
+  for (const m of chatModels) {
+    allModels.push({ ...m, providerId: selectedProviderId });
   }
 
   if (opts.nonInteractive) {
-    const provider = opts.provider || validResults[0]!.provider;
-    const model = opts.model || allModels.find((m) => m.providerId === provider)?.id || allModels[0]!.id;
-    config.primaryProvider = provider;
+    const model = opts.model || allModels[0]?.id || "gpt-4o";
+    config.primaryProvider = selectedProviderId;
     config.primaryModel = model;
-    info(`Non-interactive: using ${provider}/${model}`);
+    info(`Non-interactive: using ${selectedProviderId}/${model}`);
   } else {
     info(`Available models (${allModels.length}):`);
     const choices = allModels.slice(0, 20).map((m) => ({
@@ -210,10 +225,10 @@ export async function setupCommand(opts: SetupOptions): Promise<void> {
     const selected = await promptSelect("Select your primary reasoning model", choices, {
       default: choices[0]?.value,
     });
-    const [provider, model] = selected.split(":");
-    config.primaryProvider = provider!;
+    const [_prov, model] = selected.split(":");
+    config.primaryProvider = selectedProviderId;
     config.primaryModel = model!;
-    success(`Primary model: ${colors.cyan(provider!)}/${model!}`);
+    success(`Primary model: ${colors.cyan(selectedProviderId)}/${model!}`);
   }
 
   // ---- Step 5: Detect model capabilities ----
@@ -270,13 +285,13 @@ export async function setupCommand(opts: SetupOptions): Promise<void> {
         });
       }
 
-      for (const result of validResults) {
-        if (result.provider !== config.primaryProvider) {
-          const providerCaps = getProviderCapabilities(result.provider, validResults);
+      for (const vr of validationResults) {
+        if (vr.provider !== config.primaryProvider) {
+          const providerCaps = getProviderCapabilities(vr.provider, validationResults);
           if (providerCaps.has(cap.type)) {
             choices.push({
-              label: `${result.provider} (${cap.label})`,
-              value: result.provider,
+              label: `${vr.provider} (${cap.label})`,
+              value: vr.provider,
             });
           }
         }
@@ -348,18 +363,16 @@ export async function setupCommand(opts: SetupOptions): Promise<void> {
 // --- Helpers ---
 
 function createProviderForConfig(config: OnboardingConfig): IProvider | null {
-  if (config.primaryProvider === "openai" && config.providers.openai) {
-    return new OpenAIProvider({
-      apiKey: config.providers.openai.apiKey ?? "",
-      baseUrl: config.providers.openai.baseUrl,
-    });
+  const entry = config.providers[config.primaryProvider];
+  if (!entry) return null;
+  if (entry.type === "gemini") {
+    return new GeminiProvider({ apiKey: entry.apiKey ?? "" });
   }
-  if (config.primaryProvider === "gemini" && config.providers.gemini) {
-    return new GeminiProvider({
-      apiKey: config.providers.gemini.apiKey ?? "",
-    });
-  }
-  return null;
+  // Any openai-compatible provider (OpenAI, DeepSeek, Groq, Custom, etc.)
+  return new OpenAIProvider({
+    apiKey: entry.apiKey ?? "",
+    baseUrl: entry.baseUrl,
+  });
 }
 
 function getProviderCapabilities(provider: string, results: ValidationResult[]): Set<CapabilityType> {
@@ -378,11 +391,18 @@ function writeEnvFile(config: OnboardingConfig): void {
     `MINDI_DEFAULT_PROVIDER=${config.primaryProvider}`,
     `MINDI_DEFAULT_MODEL=${config.primaryModel}`,
   ];
-  if (config.providers.openai) {
+  for (const [id, entry] of Object.entries(config.providers)) {
+    const prefix = id.toUpperCase();
+    if (entry.apiKey) lines.push(`PROVIDER_${prefix}_API_KEY=${entry.apiKey}`);
+    if (entry.baseUrl) lines.push(`PROVIDER_${prefix}_BASE_URL=${entry.baseUrl}`);
+    if (entry.type) lines.push(`PROVIDER_${prefix}_TYPE=${entry.type}`);
+  }
+  // Legacy compat
+  if (config.providers.openai?.apiKey) {
     lines.push(`OPENAI_API_KEY=${config.providers.openai.apiKey}`);
     lines.push(`OPENAI_BASE_URL=${config.providers.openai.baseUrl ?? "https://api.openai.com/v1"}`);
   }
-  if (config.providers.gemini) {
+  if (config.providers.gemini?.apiKey) {
     lines.push(`GEMINI_API_KEY=${config.providers.gemini.apiKey}`);
   }
   lines.push(`MINDI_LOG_LEVEL=info`);

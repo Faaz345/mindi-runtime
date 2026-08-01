@@ -26,6 +26,10 @@ export type StreamEvent =
   | { type: "plan"; satisfied: string[]; missing: string[]; unavailable: Array<{ type: string; reason: string }> }
   | { type: "capability"; capabilityType: string; source: string; ok: boolean; durationMs: number; preview: string }
   | { type: "attachment"; kind: "image"; count: number; sizeBytes: number }
+  // Vision policy decision (Phase 4 — deterministic provider selection)
+  | { type: "vision"; action: "native" | "fallback" | "unavailable" | "denied"; provider?: string; model?: string; reason: string }
+  // Provider failover (Phase 5 — emitted when a provider switch occurs)
+  | { type: "provider_failover"; from: string; to: string; reason: string }
   // Agentic lifecycle events (emitted by the AgentOrchestrator)
   | { type: "task"; taskType: string; chain: string[]; reasoning: string }
   | { type: "tool"; phase: "selected" | "started" | "finished"; name: string; ok?: boolean; durationMs?: number; preview?: string }

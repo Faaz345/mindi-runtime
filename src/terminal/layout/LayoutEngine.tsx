@@ -117,25 +117,33 @@ export function LayoutProvider({ children }: { children: React.ReactNode }): Rea
   }));
 
   useEffect(() => {
+    let debounceTimer: NodeJS.Timeout | null = null;
     const onResize = () => {
-      const newDims = {
-        width: process.stdout.columns ?? 80,
-        height: process.stdout.rows ?? 24,
-      };
-      setDims(newDims);
-      // Full screen clear on resize to prevent ghost text.
-      process.stdout.write("\x1b[3J\x1b[2J\x1b[H");
+      // Debounce rapid resize events (e.g. window drag) to prevent flicker.
+      if (debounceTimer) clearTimeout(debounceTimer);
+      debounceTimer = setTimeout(() => {
+        debounceTimer = null;
+        const newDims = {
+          width: process.stdout.columns ?? 80,
+          height: process.stdout.rows ?? 24,
+        };
+        setDims(newDims);
+        // Soft clear: erase scrollback + screen without cursor jump.
+        // This prevents ghost text without the jarring full-screen flash.
+        process.stdout.write("\x1b[3J\x1b[2J\x1b[H");
+      }, 80);
     };
     process.stdout.on("resize", onResize);
     return () => {
       process.stdout.off("resize", onResize);
+      if (debounceTimer) clearTimeout(debounceTimer);
     };
   }, []);
 
   const regions = useMemo<LayoutRegions>(() => {
     const headerHeight = 3;   // border + content + border
     const footerHeight = 1;   // status/hints line
-    const promptHeight = 4;   // border + input + hints + gap
+    const promptHeight = 3;   // border + input + hints (tighter)
     const conversationHeight = Math.max(3, dims.height - headerHeight - footerHeight - promptHeight);
     const contentWidth = Math.max(20, dims.width - 2); // 1 char padding each side
 

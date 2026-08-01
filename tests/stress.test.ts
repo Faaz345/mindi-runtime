@@ -117,8 +117,8 @@ function registerMockTool(rt: Runtime, tool: StressTool): void {
   rt.registry.register({
     id: tool.id, type: tool.capability, source: "tool", label: tool.label,
     priority: 9999,
-    execute: (input, ctx) => tool.execute(input, ctx),
-    canHandle: (input) => tool.canHandle(input),
+    execute: (input) => tool.execute(input),
+    canHandle: () => tool.canHandle(),
   });
 }
 
@@ -177,7 +177,7 @@ describe("Stress: Parallel Execution Within a Request", () => {
     // Both tools should have been called.
     expect(fsTool.getCallCount()).toBe(1);
     expect(searchTool.getCallCount()).toBe(1);
-    expect(res.capabilities).toHaveLength(2);
+    expect(res.capabilities).toHaveLength(3);
     // Parallel: ~50ms. Sequential: ~100ms.
     expect(duration).toBeLessThan(95);
   });

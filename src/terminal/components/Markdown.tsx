@@ -43,8 +43,9 @@ type Block =
   | { type: "code"; lang: string; content: string }
   | { type: "heading"; level: number; content: string }
   | { type: "text"; content: string }
-  | { type: "list"; items: string[] }
+  | { type: "list"; items: string[]; ordered: boolean }
   | { type: "quote"; content: string }
+  | { type: "table"; headers: string[]; rows: string[][] }
   | { type: "hr" };
 
 function parseBlocks(text: string): Block[] {
@@ -67,6 +68,17 @@ function parseBlocks(text: string): Block[] {
     const hMatch = line.match(/^(#{1,6})\s+(.+)$/);
     if (hMatch) { blocks.push({ type: "heading", level: hMatch[1]!.length, content: hMatch[2]! }); i++; continue; }
     if (line.trim() === "---" || line.trim() === "***") { blocks.push({ type: "hr" }); i++; continue; }
+    // Table detection: line with | separators followed by a |---|---| separator row.
+    if (line.includes("|") && i + 1 < lines.length && lines[i + 1]!.match(/^\s*\|?[\s\-:|]+\|/)) {
+      const headers = line.split("|").map((c) => c.trim()).filter(Boolean);
+      i += 2; // skip header + separator
+      const rows: string[][] = [];
+      while (i < lines.length && lines[i]!.includes("|") && lines[i]!.trim() !== "") {
+        rows.push(lines[i]!.split("|").map((c) => c.trim()).filter(Boolean));
+        i++;
+      }
+      blocks.push({ type: "table", headers, rows }); continue;
+    }
     if (line.startsWith("> ")) {
       const q: string[] = [];
       while (i < lines.length && lines[i]!.startsWith("> ")) { q.push(lines[i]!.slice(2)); i++; }
@@ -75,12 +87,12 @@ function parseBlocks(text: string): Block[] {
     if (line.match(/^\s*[-*]\s+/)) {
       const items: string[] = [];
       while (i < lines.length && lines[i]!.match(/^\s*[-*]\s+/)) { items.push(lines[i]!.replace(/^\s*[-*]\s+/, "")); i++; }
-      blocks.push({ type: "list", items }); continue;
+      blocks.push({ type: "list", items, ordered: false }); continue;
     }
     if (line.match(/^\s*\d+\.\s+/)) {
       const items: string[] = [];
       while (i < lines.length && lines[i]!.match(/^\s*\d+\.\s+/)) { items.push(lines[i]!.replace(/^\s*\d+\.\s+/, "")); i++; }
-      blocks.push({ type: "list", items }); continue;
+      blocks.push({ type: "list", items, ordered: true }); continue;
     }
     const t: string[] = [];
     while (i < lines.length && lines[i]!.trim() !== "" && !lines[i]!.startsWith("```") && !lines[i]!.match(/^#{1,6}\s/) && !lines[i]!.startsWith("> ") && !lines[i]!.match(/^\s*[-*]\s+/) && !lines[i]!.match(/^\s*\d+\.\s+/)) { t.push(lines[i]!); i++; }
@@ -98,6 +110,10 @@ const BlockView = memo(function BlockView({ block, width, isStreaming, expandCod
   switch (block.type) {
     case "code": {
       const lines = block.content.split("\n");
+      // Diff blocks get special rendering.
+      if (block.lang === "diff" || block.lang === "patch") {
+        return <DiffBlock lines={lines} width={width} />;
+      }
       return expandCode || lines.length <= 40
         ? <ShortCodeBlock lang={block.lang} lines={lines} width={width} />
         : <LongCodeBlock lang={block.lang} lines={lines} width={width} isStreaming={isStreaming} />;
@@ -110,26 +126,30 @@ const BlockView = memo(function BlockView({ block, width, isStreaming, expandCod
       return (
         <Box flexDirection="column">
           {block.items.map((item, i) => (
-            <Text key={i} wrap="truncate">  <Text color={COLORS.dim}>•</Text> {renderInline(wrapText(item, width - 2))}</Text>
+            <Text key={i} wrap="truncate">  <Text color={COLORS.dim}>{block.ordered ? `${i + 1}.` : "•"}</Text> {renderInline(wrapText(item, width - 4))}</Text>
           ))}
         </Box>
       );
     case "quote":
       return <Text color={COLORS.dim} wrap="truncate">│ {wrapText(block.content, width - 2)}</Text>;
+    case "table":
+      return <TableView headers={block.headers} rows={block.rows} width={width} />;
     case "hr":
       return <Text color={COLORS.border}>{"─".repeat(Math.min(width, 60))}</Text>;
+    default:
+      return <Text>{""}</Text>;
   }
 }, (prev, next) => prev.block === next.block && prev.width === next.width && prev.isStreaming === next.isStreaming && prev.expandCode === next.expandCode);
 
 const ShortCodeBlock = memo(function ShortCodeBlock({ lang, lines, width }: { lang: string; lines: string[]; width: number }): React.ReactElement {
   return (
-    <Box flexDirection="column" marginY={0}>
+    <Box flexDirection="column" marginY={0} borderStyle="single" borderColor={COLORS.border} borderLeft={true} borderTop={false} borderBottom={false} borderRight={false} paddingLeft={1}>
       <Box flexDirection="row" gap={1}>
-        <Text color={COLORS.codeLang}>  {lang || "code"}</Text>
+        <Text color={COLORS.codeLang}>{lang || "code"}</Text>
         <Text color={COLORS.dim}> {lines.length} lines</Text>
       </Box>
       {lines.map((line, i) => (
-        <Text key={i} wrap="truncate"><Text color={COLORS.codeLineNumber}>{String(i + 1).padStart(String(lines.length).length)} │</Text>{highlightLine(wrapText(line, width - 8), lang)}</Text>
+        <Text key={i} wrap="truncate"><Text color={COLORS.codeLineNumber}>{String(i + 1).padStart(String(lines.length).length)} │</Text>{highlightLine(wrapText(line, width - 10), lang)}</Text>
       ))}
     </Box>
   );
@@ -170,6 +190,42 @@ const LongCodeBlock = memo(function LongCodeBlock({ lang, lines, width, isStream
     </Box>
   );
 }, (prev, next) => prev.lang === next.lang && prev.lines === next.lines && prev.width === next.width && prev.isStreaming === next.isStreaming);
+
+/** Diff block — green for additions, red for deletions, dim for context. */
+const DiffBlock = memo(function DiffBlock({ lines, width }: { lines: string[]; width: number }): React.ReactElement {
+  return (
+    <Box flexDirection="column">
+      <Text color={COLORS.codeLang}>  diff</Text>
+      {lines.map((line, i) => {
+        if (line.startsWith("+")) return <Text key={i} color="#4ec959" wrap="truncate">{wrapText(line, width)}</Text>;
+        if (line.startsWith("-")) return <Text key={i} color="#f14c4c" wrap="truncate">{wrapText(line, width)}</Text>;
+        if (line.startsWith("@@")) return <Text key={i} color={COLORS.codeLang} wrap="truncate">{wrapText(line, width)}</Text>;
+        return <Text key={i} color={COLORS.dim} wrap="truncate">{wrapText(line, width)}</Text>;
+      })}
+    </Box>
+  );
+}, (prev, next) => prev.lines === next.lines && prev.width === next.width);
+
+/** Table view — aligned columns with header separator. */
+const TableView = memo(function TableView({ headers, rows, width }: { headers: string[]; rows: string[][]; width: number }): React.ReactElement {
+  // Compute column widths (capped to fit terminal).
+  const colWidths = headers.map((h, ci) => {
+    const maxData = rows.reduce((max, row) => Math.max(max, (row[ci] ?? "").length), 0);
+    return Math.min(Math.max(h.length, maxData), Math.floor((width - 4) / headers.length));
+  });
+  const pad = (s: string, w: number) => s.length > w ? s.slice(0, w - 1) + "…" : s.padEnd(w);
+  const sep = colWidths.map((w) => "─".repeat(w)).join("─┼─");
+
+  return (
+    <Box flexDirection="column">
+      <Text bold color={COLORS.header} wrap="truncate"> {headers.map((h, i) => pad(h, colWidths[i]!)).join(" │ ")}</Text>
+      <Text color={COLORS.border} wrap="truncate"> {sep}</Text>
+      {rows.map((row, ri) => (
+        <Text key={ri} wrap="truncate"> {row.map((cell, ci) => pad(cell, colWidths[ci] ?? 8)).join(" │ ")}</Text>
+      ))}
+    </Box>
+  );
+}, (prev, next) => prev.headers === next.headers && prev.rows === next.rows && prev.width === next.width);
 
 // ---------------------------------------------------------------------------
 // Syntax highlighting (unchanged)

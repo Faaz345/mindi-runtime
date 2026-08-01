@@ -112,6 +112,8 @@ export type { NetworkPolicy, NetworkPolicyConfig, TrustedDomain } from "./tools/
 // Providers
 export { ProviderManager } from "./providers/ProviderManager.js";
 export type { UsageRecord } from "./providers/ProviderManager.js";
+export { ProviderRouter } from "./providers/ProviderRouter.js";
+export type { RouteContext, RouteDecision } from "./providers/ProviderRouter.js";
 export { BaseProvider, mapHttpError } from "./providers/BaseProvider.js";
 export { OpenAIProvider } from "./providers/openai/OpenAIProvider.js";
 export type { OpenAIProviderOptions } from "./providers/openai/OpenAIProvider.js";
@@ -121,7 +123,7 @@ export { TokenRouterProvider } from "./providers/tokenrouter/TokenRouterProvider
 export type { TokenRouterProviderOptions } from "./providers/tokenrouter/TokenRouterProvider.js";
 export { loadProvidersFromConfig } from "./providers/provider-loader.js";
 export type { ProviderEntry, ProvidersConfig, ProviderRetryPolicy, AuthMethod } from "./providers/provider-config.js";
-export { resolveProviderEntry, providersFromEnv, PROVIDER_DEFAULTS, DEFAULT_RETRY_POLICY } from "./providers/provider-config.js";
+export { resolveProviderEntry, providersFromEnv, PROVIDER_DEFAULTS, DEFAULT_RETRY_POLICY, WIZARD_PROVIDER_LIST } from "./providers/provider-config.js";
 
 // Pipeline stages
 export { IntentAnalyzer } from "./intent/IntentAnalyzer.js";
@@ -145,6 +147,8 @@ export {
 export type { AgentToolDef, ToolCall } from "./agent/toolProtocol.js";
 export { extractCodeBlocks, pickTargetPath, writeArtifact } from "./agent/artifactRescue.js";
 export type { RescuedArtifact, CodeBlock } from "./agent/artifactRescue.js";
+export { VisionPolicy } from "./agent/VisionPolicy.js";
+export type { VisionDecision, VisionPreference, VisionAction } from "./agent/VisionPolicy.js";
 
 // Execution graph
 export { GraphBuilder, topologicalWaves, graphToString } from "./planner/ExecutionGraph.js";

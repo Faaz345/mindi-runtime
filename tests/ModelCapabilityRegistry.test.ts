@@ -164,11 +164,12 @@ describe("CapabilityDetector — universal heuristic", () => {
     expect(p.audioInput).toBe(true);
   });
 
-  it("grants tool calling + JSON to ordinary chat models by default", () => {
+  it("grants chat to ordinary chat models by default (toolCalling/JSON require evidence)", () => {
     const p = buildProfile("any", "somevendor/some-chat-model", undefined, "heuristic");
     expect(p.chat).toBe(true);
-    expect(p.toolCalling).toBe(true);
-    expect(p.supportsJSON).toBe(true);
+    // toolCalling and supportsJSON are no longer assumed true for all models —
+    // only when metadata or naming conventions indicate support.
+    expect(p.toolCalling).toBeFalsy();
   });
 });
 

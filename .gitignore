@@ -7,3 +7,13 @@ coverage/
 
 # MINDI workspace data is per-user and may contain provider credentials.
 .mindi/
+
+# IDE / tooling
+.qoder/
+.claude/
+
+# Desktop application (separate project, own lifecycle)
+MINDIGENOUS Desktop/
+
+# Temporary reports / benchmarks
+REPORT.md

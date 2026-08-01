@@ -16,7 +16,7 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { Box, Text, Static, useInput, useApp } from "ink";
 import type { Runtime, RuntimeEvent } from "../index.js";
-import { LayoutProvider } from "./layout/LayoutEngine.js";
+import { LayoutProvider, useLayout } from "./layout/LayoutEngine.js";
 import { COLORS } from "./colors.js";
 import { Header } from "./components/Header.js";
 import { PromptInput } from "./components/PromptInput.js";
@@ -28,6 +28,10 @@ import { LogsPanel } from "./panels/LogsPanel.js";
 import { GraphPanel } from "./panels/GraphPanel.js";
 import { CommandPalette } from "./panels/CommandPalette.js";
 import { ModelPicker } from "./panels/ModelPicker.js";
+import { Timeline } from "./events/Timeline.js";
+import { EventBridge } from "./events/EventBridge.js";
+import { StreamAccumulator } from "./events/StreamAccumulator.js";
+import type { RuntimeEvent2 } from "./events/RuntimeEvents.js";
 import type { Message, Attachment, RuntimeStatus, ActivityItem } from "./types.js";
 import { closesPanel, type ActivePanel } from "./panelKeyboard.js";
 
@@ -39,6 +43,8 @@ export interface TerminalProps {
   workspace: string;
   /** Messages restored from the previous workspace session. */
   restoredMessages?: Message[];
+  /** Execution timeline events restored from the previous session. */
+  restoredTimeline?: import("../workspace/types.js").ExecutionEvent[];
   /** Called when a slash command switches to a different session. */
   onSwitchSession?: (sessionId: string) => void;
 }
@@ -79,8 +85,9 @@ export function Terminal(props: TerminalProps): React.ReactElement {
   );
 }
 
-function TerminalInner({ runtime, sessionId, providerId: initialProviderId, modelId: initialModelId, workspace, restoredMessages = [], onSwitchSession }: TerminalProps): React.ReactElement {
+function TerminalInner({ runtime, sessionId, providerId: initialProviderId, modelId: initialModelId, workspace, restoredMessages = [], restoredTimeline = [], onSwitchSession }: TerminalProps): React.ReactElement {
   const { exit } = useApp();
+  const { regions } = useLayout();
   const [currentProviderId, setCurrentProviderId] = useState(initialProviderId);
   const [currentModelId, setCurrentModelId] = useState(initialModelId);
   const [messages, setMessages] = useState<Message[]>(restoredMessages);
@@ -91,6 +98,9 @@ function TerminalInner({ runtime, sessionId, providerId: initialProviderId, mode
   const [status, setStatus] = useState<RuntimeStatus>({ stage: "idle", detail: "" });
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [activePanel, setActivePanel] = useState<ActivePanel>("none");
+  // Phase 4: Vision fallback prompt (shown once when no preference exists).
+  const [visionPrompt, setVisionPrompt] = useState<{ label: string } | null>(null);
+  const visionResolveRef = useRef<((allowed: boolean) => void) | null>(null);
   const [currentStream, setCurrentStream] = useState<string>("");
   const [metricsVersion, setMetricsVersion] = useState(0);
   const [queue, setQueue] = useState<QueuedPrompt[]>([]);
@@ -105,7 +115,14 @@ function TerminalInner({ runtime, sessionId, providerId: initialProviderId, mode
   useEffect(() => {
     setMessages(restoredMessages);
     setEpoch((current) => current + 1);
-  }, [sessionId, restoredMessages]);
+    // Phase 6: Seed the EventBridge with the restored execution timeline so
+    // the Timeline component shows the session's history immediately.
+    bridgeRef.current.reset();
+    if (restoredTimeline.length > 0) {
+      bridgeRef.current.seed(restoredTimeline);
+    }
+    setTimelineEvents([...bridgeRef.current.getEvents()]);
+  }, [sessionId, restoredMessages, restoredTimeline]);
 
   const abortRef = useRef<AbortController | null>(null);
   const startTimeRef = useRef(0);
@@ -114,11 +131,29 @@ function TerminalInner({ runtime, sessionId, providerId: initialProviderId, mode
   const streamBufferRef = useRef("");
   const flushTimerRef = useRef<NodeJS.Timeout | null>(null);
   const eventsRef = useRef<RuntimeEvent[]>([]);
+  // Phase 3: EventBridge + StreamAccumulator — wired to the Timeline.
+  const bridgeRef = useRef(new EventBridge());
+  const accumulatorRef = useRef(new StreamAccumulator(33));
+  const [timelineEvents, setTimelineEvents] = useState<RuntimeEvent2[]>([]);
+  const timelineFlushRef = useRef<NodeJS.Timeout | null>(null);
 
   const flushStream = useCallback(() => {
     flushTimerRef.current = null;
     setCurrentStream(streamBufferRef.current);
   }, []);
+
+  /** Batch-flush the EventBridge's accumulated events into Timeline state. */
+  const flushTimeline = useCallback(() => {
+    timelineFlushRef.current = null;
+    setTimelineEvents([...bridgeRef.current.getEvents()]);
+  }, []);
+
+  /** Schedule a timeline flush (debounced — max ~5 updates/sec). */
+  const scheduleTimelineFlush = useCallback(() => {
+    if (!timelineFlushRef.current) {
+      timelineFlushRef.current = setTimeout(flushTimeline, 200);
+    }
+  }, [flushTimeline]);
 
   // Suppress stderr log lines.
   useEffect(() => {
@@ -131,15 +166,18 @@ function TerminalInner({ runtime, sessionId, providerId: initialProviderId, mode
     return () => { process.stderr.write = orig; };
   }, []);
 
-  // Runtime events → ref (no rerender) + status (conditional rerender).
+  // Runtime events → ref (no rerender) + status (conditional rerender) + EventBridge (Timeline).
   useEffect(() => {
     const off = runtime.onAny((event) => {
       eventsRef.current = [...eventsRef.current.slice(-200), event];
       const s = statusFromEvent(event);
       if (s) setStatus(s);
+      // Phase 3: feed the EventBridge so the Timeline renders real events.
+      bridgeRef.current.ingestRuntimeEvent(event);
+      scheduleTimelineFlush();
     });
     return off;
-  }, [runtime]);
+  }, [runtime, scheduleTimelineFlush]);
 
   useEffect(() => { if (!isStreaming) setMetricsVersion((v) => v + 1); }, [isStreaming]);
 
@@ -274,7 +312,7 @@ function TerminalInner({ runtime, sessionId, providerId: initialProviderId, mode
           saveConfig(cfg);
           // Switch to the new provider
           const mdl = defaultModel || "gpt-4o-mini";
-          runtime.sessions.setModel(sessionId, newId, mdl);
+          runtime.setSessionModel(sessionId, newId, mdl);
           setCurrentProviderId(newId);
           setCurrentModelId(mdl);
           setMessages((p) => [...p, { role: "system", content: `Added and switched to ${newId}/${mdl}`, timestamp: Date.now() }]);
@@ -322,7 +360,7 @@ function TerminalInner({ runtime, sessionId, providerId: initialProviderId, mode
             mdl = rawArg.replace(/[<>]/g, "");
           }
           if (prov && mdl) {
-            runtime.sessions.setModel(sessionId, prov, mdl);
+            runtime.setSessionModel(sessionId, prov, mdl);
             setCurrentProviderId(prov);
             setCurrentModelId(mdl);
             setMessages((p) => [...p, { role: "system", content: `Switched to ${prov}/${mdl}`, timestamp: Date.now() }]);
@@ -403,10 +441,40 @@ function TerminalInner({ runtime, sessionId, providerId: initialProviderId, mode
     setCurrentStream("");
     activitiesRef.current = []; setActivities([]); activityStartRef.current.clear();
     startTimeRef.current = Date.now(); streamBufferRef.current = ""; tokenCountRef.current = 0; firstTokenTimeRef.current = 0;
+    // Phase 3: reset the EventBridge + StreamAccumulator for this request.
+    bridgeRef.current.reset();
+    accumulatorRef.current.reset();
+    setTimelineEvents([]);
+    // Phase 4: Pre-flight vision check — ask user once if no preference exists.
+    const hasImageRef = /"([^"]+\.(?:png|jpe?g|gif|webp|bmp|tiff?))"/i.test(text)
+      || /'([^']+\.(?:png|jpe?g|gif|webp|bmp|tiff?))'/i.test(text)
+      || /([A-Za-z]:[\\\/][^\s"']+\.(?:png|jpe?g|gif|webp|bmp|tiff?))/i.test(text)
+      || attach.some((a) => (a.mimeType ?? "").startsWith("image/"));
+    if (hasImageRef) {
+      try {
+        const decision = await runtime.getVisionDecision(sessionId, currentModelId, true);
+        if (decision.action === "ask") {
+          const candidateLabel = decision.candidates?.[0]
+            ? `${decision.candidates[0].providerId}/${decision.candidates[0].modelId}`
+            : "another model";
+          const allowed = await new Promise<boolean>((resolve) => {
+            visionResolveRef.current = resolve;
+            setVisionPrompt({ label: `${currentModelId} can't process images. Use vision fallback (${candidateLabel})? [Y/n]` });
+          });
+          setVisionPrompt(null);
+          visionResolveRef.current = null;
+          runtime.setVisionPreference(allowed, decision.candidates?.[0]?.providerId, decision.candidates?.[0]?.modelId);
+        }
+      } catch {
+        // Vision check failed — proceed normally (fallback will handle it reactively).
+      }
+    }
     const ctrl = new AbortController(); abortRef.current = ctrl;
     try {
       let st = "";
       for await (const ev of runtime.request({ sessionId, text, mode, signal: ctrl.signal, modelId: currentModelId, attachments: attach.length > 0 ? attach.map((a) => ({ name: a.name, mimeType: a.mimeType, data: a.data })) : undefined })) {
+        // Phase 3: feed every StreamEvent to the EventBridge (Timeline).
+        bridgeRef.current.ingestStreamEvent(ev);
         switch (ev.type) {
           case "intent":
             startActivity({ id: "intent", icon: "✻", label: "Analyzed intent", detail: ev.summary.slice(0, 50) });
@@ -440,6 +508,26 @@ function TerminalInner({ runtime, sessionId, providerId: initialProviderId, mode
             finishActivity("attach", true);
             break;
           }
+          // Phase 4: Vision policy decision — always visible, never silent.
+          case "vision": {
+            const icon = ev.action === "native" ? "👁" : ev.action === "fallback" ? "🔄" : ev.action === "denied" ? "🚫" : "⚠️";
+            const label = ev.action === "native" ? "Native vision"
+              : ev.action === "fallback" ? `Vision fallback: ${ev.provider}/${ev.model}`
+              : ev.action === "denied" ? "Vision fallback disabled"
+              : "Vision unavailable";
+            startActivity({ id: "vision", icon, label, detail: ev.reason });
+            finishActivity("vision", ev.action === "native" || ev.action === "fallback");
+            scheduleTimelineFlush();
+            break;
+          }
+          // Phase 5: Provider failover — always visible, explains exactly why.
+          case "provider_failover": {
+            startActivity({ id: "failover", icon: "⚡", label: `Failover: ${ev.from} → ${ev.to}`, detail: ev.reason });
+            finishActivity("failover", true);
+            setStatus({ stage: "generating", detail: `via ${ev.to}` });
+            scheduleTimelineFlush();
+            break;
+          }
           // ---- Agentic lifecycle events ----------------------------------
           case "task": {
             setStatus({ stage: "planning", detail: ev.taskType });
@@ -454,6 +542,11 @@ function TerminalInner({ runtime, sessionId, providerId: initialProviderId, mode
               startActivity({ id, icon: "🔧", label: ev.name, detail: ev.preview });
               setActs((prev) => prev.map((a) => (a.id === id ? { ...a, status: ev.ok ? "done" : "failed", durationMs: ev.durationMs } : a)));
               activityStartRef.current.delete(id);
+              scheduleTimelineFlush();
+            } else if (ev.phase === "started") {
+              // Phase 3: show the tool running in real time.
+              startActivity({ id, icon: "🔧", label: ev.name, detail: ev.preview });
+              scheduleTimelineFlush();
             } else {
               startActivity({ id, icon: "🔧", label: ev.name, detail: ev.phase });
             }
@@ -482,9 +575,15 @@ function TerminalInner({ runtime, sessionId, providerId: initialProviderId, mode
             finishActivity("goal", ev.status === "completed");
             break;
           }
-          case "delta": st += ev.text; streamBufferRef.current = st; tokenCountRef.current += Math.ceil(ev.text.length / 4);
+          case "delta": st += ev.text; tokenCountRef.current += Math.ceil(ev.text.length / 4);
             if (firstTokenTimeRef.current === 0) firstTokenTimeRef.current = Date.now();
-            if (!flushTimerRef.current) flushTimerRef.current = setTimeout(flushStream, 150); break;
+            // Phase 3: StreamAccumulator for block-aware buffering.
+            accumulatorRef.current.append(ev.text);
+            streamBufferRef.current = accumulatorRef.current.getRawText();
+            if (accumulatorRef.current.shouldFlush()) {
+              if (flushTimerRef.current) { clearTimeout(flushTimerRef.current); flushTimerRef.current = null; }
+              flushStream();
+            } else if (!flushTimerRef.current) flushTimerRef.current = setTimeout(flushStream, 150); break;
           case "done": if (flushTimerRef.current) { clearTimeout(flushTimerRef.current); flushTimerRef.current = null; }
             setCurrentStream(st);
             if (st.trim()) {
@@ -493,6 +592,8 @@ function TerminalInner({ runtime, sessionId, providerId: initialProviderId, mode
               const activitySnapshot = [...activitiesRef.current];
               setMessages((p) => [...p, { role: "assistant", content: st, timestamp: Date.now(), durationMs: Date.now() - startTimeRef.current, modelId: currentModelId, activities: activitySnapshot }]);
             }
+            // Phase 3: final timeline flush so completion event is visible.
+            flushTimeline();
             setCurrentStream(""); break;
           case "error": if (flushTimerRef.current) { clearTimeout(flushTimerRef.current); flushTimerRef.current = null; }
             if (st.trim()) {
@@ -561,6 +662,12 @@ function TerminalInner({ runtime, sessionId, providerId: initialProviderId, mode
 
   // SINGLE useInput.
   useInput((ch, key) => {
+    // Phase 4: Vision prompt owns input while visible.
+    if (visionPrompt && visionResolveRef.current) {
+      if (ch === "n" || ch === "N" || key.escape) { visionResolveRef.current(false); }
+      else if (ch === "y" || ch === "Y" || key.return) { visionResolveRef.current(true); }
+      return;
+    }
     // Panels own the keyboard while mounted. This must run before every
     // prompt handler: previously the early return below swallowed Tab/Escape,
     // leaving Inspector open forever and allowing competing Ink renders.
@@ -676,12 +783,19 @@ function TerminalInner({ runtime, sessionId, providerId: initialProviderId, mode
       </Static>
 
       {/* Live region — only this part re-renders while streaming. */}
-      <MemoHeader providerId={currentProviderId} modelId={currentModelId} sessionId={sessionId} workspace={workspace} metrics={metrics} />
+      <MemoHeader providerId={currentProviderId} providerLabel={runtime.providers.get(currentProviderId)?.label} modelId={currentModelId} sessionId={sessionId} workspace={workspace} metrics={metrics} />
 
       {/* Live backend activity feed — what the AI is doing right now. */}
       {isStreaming && activities.length > 0 && (
-        <Box marginTop={1} paddingX={1}>
+        <Box paddingX={1}>
           <MemoActivityFeed items={activities} showSpinner={true} />
+        </Box>
+      )}
+
+      {/* Phase 3: Execution Timeline — renders every real runtime event. */}
+      {isStreaming && timelineEvents.length > 0 && (
+        <Box paddingX={1}>
+          <Timeline events={timelineEvents} maxWidth={regions.contentWidth} />
         </Box>
       )}
 
@@ -716,6 +830,13 @@ function TerminalInner({ runtime, sessionId, providerId: initialProviderId, mode
         </Box>
       )}
 
+      {/* Phase 4: Vision fallback prompt (one-time, blocks until Y/N). */}
+      {visionPrompt && (
+        <Box paddingX={1}>
+          <Text color={COLORS.sky} bold>👁 {visionPrompt.label}</Text>
+        </Box>
+      )}
+
       {/* Fixed prompt */}
       <MemoPromptInput
         value={input}
@@ -738,7 +859,7 @@ function TerminalInner({ runtime, sessionId, providerId: initialProviderId, mode
           currentProviderId={currentProviderId}
           currentModelId={currentModelId}
           onSwitch={(prov, mdl) => {
-            runtime.sessions.setModel(sessionId, prov, mdl);
+            runtime.setSessionModel(sessionId, prov, mdl);
             setCurrentProviderId(prov);
             setCurrentModelId(mdl);
             setMessages((p) => [...p, { role: "system", content: `Switched to ${prov}/${mdl}`, timestamp: Date.now() }]);

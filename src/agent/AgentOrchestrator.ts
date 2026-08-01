@@ -252,6 +252,13 @@ export class AgentOrchestrator {
       for (const { call: parsedCall, native } of allCalls) {
         const call = normalizeToolCall(parsedCall, opts.workspace);
         toolsExecuted++;
+        // Emit "started" so the UI shows the tool running in real time.
+        yield {
+          type: "tool",
+          phase: "started",
+          name: call.name,
+          preview: describeCall(call),
+        };
         const toolResult = await this.executeCall(call, opts);
         // Emit tool lifecycle events.
         yield {
@@ -494,6 +501,21 @@ function previewOf(result: CapabilityResult): string {
     case "command": return `exit ${p.exitCode}`;
     case "search": return `${p.results.length} results`;
     default: return "ok";
+  }
+}
+
+/** Human-readable one-liner for a tool call (shown in "started" events). */
+function describeCall(call: ToolCall): string {
+  switch (call.name) {
+    case "fs.read": return `Reading ${call.arguments.path ?? ""}`;
+    case "fs.write": return `Writing ${call.arguments.path ?? ""}`;
+    case "fs.mkdir": return `Creating ${call.arguments.path ?? ""}`;
+    case "fs.list": return `Listing ${call.arguments.path ?? "."}`;
+    case "terminal.run": return `${call.arguments.command ?? ""}`;
+    case "git.run": return `git ${call.arguments.command ?? ""}`;
+    case "web.search": return `Searching: ${call.arguments.query ?? ""}`;
+    case "http.get": return `Fetching ${call.arguments.url ?? ""}`;
+    default: return call.name;
   }
 }
 

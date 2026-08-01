@@ -340,6 +340,19 @@ function contentToString(content: ChatContent): string {
   return content.filter((p) => p.type === "text").map((p) => p.text).join("");
 }
 
+/** Race a promise against an AbortSignal to interrupt stalled reads. */
+function raceAbort<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
+  if (signal.aborted) return Promise.reject(new DOMException("Aborted", "AbortError"));
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => reject(new DOMException("Aborted", "AbortError"));
+    signal.addEventListener("abort", onAbort, { once: true });
+    promise.then(
+      (v) => { signal.removeEventListener("abort", onAbort); resolve(v); },
+      (e) => { signal.removeEventListener("abort", onAbort); reject(e); },
+    );
+  });
+}
+
 /**
  * Parse Gemini's SSE stream into normalized ChatChunks.
  * Gemini returns `data: {json}` events where each json is a GenerateContentResponse.
@@ -359,7 +372,7 @@ async function* parseGeminiSSE(
         await reader.cancel();
         return;
       }
-      const { done, value } = await reader.read();
+      const { done, value } = await raceAbort(reader.read(), ctx.signal);
       if (done) break;
       buffer += decoder.decode(value, { stream: true });
 

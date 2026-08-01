@@ -49,8 +49,14 @@ export interface WorkspacePaths {
 
 export class WorkspaceStore {
   readonly paths: WorkspacePaths;
+  /** Debounce timer for coalesced writes (Phase 8 performance). */
+  private writeTimers = new Map<string, NodeJS.Timeout>();
+  /** Pending data for debounced writes. */
+  private pendingWrites = new Map<string, unknown>();
+  /** Debounce interval in ms for non-critical writes. */
+  private readonly writeDebounceMs: number;
 
-  constructor(rootDir: string) {
+  constructor(rootDir: string, opts?: { writeDebounceMs?: number }) {
     const mindi = path.join(rootDir, MINDI_DIR);
     this.paths = {
       root: rootDir,
@@ -63,6 +69,7 @@ export class WorkspaceStore {
       projectJson: path.join(mindi, "memory", "project.json"),
       summariesJson: path.join(mindi, "memory", "summaries.json"),
     };
+    this.writeDebounceMs = opts?.writeDebounceMs ?? 150;
   }
 
   // ---- Existence / creation -------------------------------------------
@@ -123,6 +130,15 @@ export class WorkspaceStore {
     this.writeJson(this.paths.workspaceJson, meta);
   }
 
+  /**
+   * Debounced workspace write — coalesces rapid index updates during a
+   * single request cycle. Phase 8 performance optimization.
+   */
+  writeWorkspaceDebounced(meta: WorkspaceMeta): void {
+    meta.updatedAt = Date.now();
+    this.writeJsonDebounced(this.paths.workspaceJson, meta);
+  }
+
   // ---- Sessions -------------------------------------------------------
 
   /** List session ids present on disk (regardless of the index). */
@@ -144,6 +160,16 @@ export class WorkspaceStore {
   writeSession(record: SessionRecord): void {
     assertSessionId(record.id);
     this.writeJson(this.sessionFile(record.id), record);
+  }
+
+  /**
+   * Debounced session write — coalesces rapid mutations (remember +
+   * recordEvent + addUsage within a single request cycle) into one disk
+   * write. Phase 8 performance optimization. Used by persist() internally.
+   */
+  writeSessionDebounced(record: SessionRecord): void {
+    assertSessionId(record.id);
+    this.writeJsonDebounced(this.sessionFile(record.id), record);
   }
 
   deleteSession(id: string): void {
@@ -277,6 +303,39 @@ export class WorkspaceStore {
         cause: err instanceof Error ? err : new Error(String(err)),
       });
     }
+  }
+
+  /**
+   * Debounced write — coalesces multiple writes to the same file within a
+   * short window. Only the LAST data wins. This eliminates redundant disk
+   * I/O during rapid mutations (remember + recordEvent + addUsage in a single
+   * request cycle). Phase 8 performance optimization.
+   */
+  writeJsonDebounced(file: string, data: unknown): void {
+    this.pendingWrites.set(file, data);
+    const existing = this.writeTimers.get(file);
+    if (existing) clearTimeout(existing);
+    this.writeTimers.set(file, setTimeout(() => {
+      this.writeTimers.delete(file);
+      const pending = this.pendingWrites.get(file);
+      this.pendingWrites.delete(file);
+      if (pending !== undefined) {
+        this.writeJson(file, pending);
+      }
+    }, this.writeDebounceMs));
+  }
+
+  /** Flush all pending debounced writes immediately (e.g. on exit). */
+  flush(): void {
+    for (const [file, timer] of this.writeTimers) {
+      clearTimeout(timer);
+      const pending = this.pendingWrites.get(file);
+      if (pending !== undefined) {
+        this.writeJson(file, pending);
+      }
+    }
+    this.writeTimers.clear();
+    this.pendingWrites.clear();
   }
 }
 

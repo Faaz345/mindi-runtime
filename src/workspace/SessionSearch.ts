@@ -15,16 +15,37 @@ import type { SearchQuery, SessionSearchResult, SessionRecord, SessionSummary } 
 import type { WorkspaceStore } from "./WorkspaceStore.js";
 
 export class SessionSearch {
+  /**
+   * Optional in-memory record provider. When set, search prefers live
+   * in-memory records over disk reads — this ensures debounced writes
+   * (Phase 8) don't cause stale search results.
+   */
+  private liveRecords: (() => Map<string, SessionRecord>) | null = null;
+
   constructor(private readonly store: WorkspaceStore) {}
 
-  /** Run a search against all on-disk sessions. */
+  /** Attach a live record source (called by WorkspaceSessionManager). */
+  attachLiveRecords(provider: () => Map<string, SessionRecord>): void {
+    this.liveRecords = provider;
+  }
+
+  /** Run a search against all sessions (in-memory first, disk fallback). */
   search(query: SearchQuery): SessionSearchResult[] {
     const q = (query.query ?? "").trim().toLowerCase();
     const terms = q ? q.split(/\s+/).filter(Boolean) : [];
     const results: SessionSearchResult[] = [];
 
-    for (const id of this.store.listSessionFiles()) {
-      const rec = this.store.readSession(id);
+    // Phase 8: Prefer in-memory records (always up-to-date) over disk reads.
+    // Merge both sources: in-memory records take priority, but disk-only
+    // sessions (not yet loaded) are also included.
+    const live = this.liveRecords?.();
+    const diskIds = this.store.listSessionFiles();
+    const allIds = live
+      ? [...new Set([...live.keys(), ...diskIds])]
+      : diskIds;
+
+    for (const id of allIds) {
+      const rec = live?.get(id) ?? this.store.readSession(id);
       if (!rec) continue;
       if (rec.archived && !query.includeArchived) continue;
       if (query.providerId && rec.providerId !== query.providerId) continue;

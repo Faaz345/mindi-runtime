@@ -37,11 +37,7 @@ const ENV_PATTERNS: Array<{ env: string; provider: string; label: string }> = [
   { env: "ANTHROPIC_API_KEY", provider: "anthropic", label: "Anthropic Claude" },
   { env: "GROQ_API_KEY", provider: "groq", label: "Groq" },
   { env: "DEEPSEEK_API_KEY", provider: "deepseek", label: "DeepSeek" },
-  { env: "TOGETHER_API_KEY", provider: "together", label: "Together AI" },
-  { env: "FIREWORKS_API_KEY", provider: "fireworks", label: "Fireworks AI" },
-  { env: "OPENROUTER_API_KEY", provider: "openrouter", label: "OpenRouter" },
-  { env: "TOKENROUTER_API_KEY", provider: "tokenrouter", label: "TokenRouter" },
-  { env: "PROVIDER_TOKENROUTER_API_KEY", provider: "tokenrouter", label: "TokenRouter" },
+  { env: "MISTRAL_API_KEY", provider: "mistral", label: "Mistral AI" },
 ];
 
 /** Known config file locations to check. */
@@ -118,7 +114,7 @@ export function detectApiKeys(): DetectedKey[] {
           else if (extracted.startsWith("AIza")) { provider = "gemini"; label = "Google Gemini"; }
           else if (extracted.startsWith("sk-ant")) { provider = "anthropic"; label = "Anthropic Claude"; }
           else if (extracted.startsWith("gsk_")) { provider = "groq"; label = "Groq"; }
-          else if (extracted.startsWith("tr-")) { provider = "tokenrouter"; label = "TokenRouter"; }
+          else if (extracted.startsWith("tr-")) { provider = "tokenrouter"; label = "MINDI Cloud"; }
           else { provider = "custom"; label = "Custom Provider"; }
         }
         found.push({

@@ -209,7 +209,7 @@ export class OpenAIProvider extends BaseProvider {
         method: "POST",
         headers: this.headers(),
         body: JSON.stringify(body),
-        timeoutMs: 0, // No timeout — let the stream run until the model finishes.
+        timeoutMs: 30_000, // Connection timeout — stream idle is handled by Runtime's streamChatTurn.
       },
       ctx,
     );
@@ -494,6 +494,22 @@ function normalizeContent(content: ChatContent): unknown {
  * Parse an SSE stream from a fetch Response body into ChatChunks.
  * Handles OpenAI's `data: {json}` / `data: [DONE]` format.
  */
+/**
+ * Race a promise against an AbortSignal. If the signal fires first,
+ * the race rejects with an AbortError, interrupting stalled reads.
+ */
+function raceAbort<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
+  if (signal.aborted) return Promise.reject(new DOMException("Aborted", "AbortError"));
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => reject(new DOMException("Aborted", "AbortError"));
+    signal.addEventListener("abort", onAbort, { once: true });
+    promise.then(
+      (v) => { signal.removeEventListener("abort", onAbort); resolve(v); },
+      (e) => { signal.removeEventListener("abort", onAbort); reject(e); },
+    );
+  });
+}
+
 async function* parseSSEStream(
   body: ReadableStream<Uint8Array>,
   ctx: ExecutionContext,
@@ -523,11 +539,13 @@ async function* parseSSEStream(
       let done = false;
       let value: Uint8Array | undefined;
       try {
-        const result = await reader.read();
+        // Race reader.read() against the abort signal so a timeout/cancel
+        // can interrupt a stalled stream (provider accepted but never sends).
+        const result = await raceAbort(reader.read(), ctx.signal);
         done = result.done;
         value = result.value as Uint8Array;
       } catch {
-        // Connection terminated prematurely — emit done with whatever we have.
+        // Connection terminated prematurely or aborted — emit done with whatever we have.
         break;
       }
       if (done) break;

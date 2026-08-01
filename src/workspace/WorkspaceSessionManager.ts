@@ -90,6 +90,9 @@ export class WorkspaceSessionManager {
     } else {
       this.meta = store.readWorkspace();
     }
+    // Phase 8: Let search use live in-memory records so debounced writes
+    // don't cause stale search results.
+    this.search.attachLiveRecords(() => this.records);
   }
 
   // ---- Lifecycle ------------------------------------------------------
@@ -166,6 +169,7 @@ export class WorkspaceSessionManager {
       pinned: false,
     };
     this.records.set(id, rec);
+    // Critical: immediate write so the session exists on disk before returning.
     this.store.writeSession(rec);
     this.meta.sessions.push(WorkspaceStore.toSummary(rec));
     this.meta.activeSessionId = id;
@@ -184,6 +188,7 @@ export class WorkspaceSessionManager {
     this.activeId = id;
     this.meta.activeSessionId = id;
     this.upsertSummary(rec);
+    // Critical: immediate write so the active pointer is persisted before returning.
     this.store.writeSession(rec);
     this.store.writeWorkspace(this.meta);
     return rec;
@@ -310,12 +315,16 @@ export class WorkspaceSessionManager {
       if (firstUser) rec.title = deriveTitle(toText(firstUser.content));
     }
 
-    // Auto-compress if over the rolling window.
+    // Phase 8: Fast-path guard — only invoke the compressor when the history
+    // actually exceeds the rolling window. This avoids a disk read of
+    // summaries.json on every single message.
     const keep = this.meta.settings.maxHistoryMessages ?? 50;
-    const result = this.compressor.compress(id, rec.messages, { keepRecent: keep });
-    if (result.compressed && result.summary && result.kept) {
-      rec.messages = result.kept;
-      rec.summary = result.summary;
+    if (rec.messages.length > keep) {
+      const result = this.compressor.compress(id, rec.messages, { keepRecent: keep });
+      if (result.compressed && result.summary && result.kept) {
+        rec.messages = result.kept;
+        rec.summary = result.summary;
+      }
     }
 
     rec.updatedAt = Date.now();
@@ -462,9 +471,14 @@ export class WorkspaceSessionManager {
   private persist(rec: SessionRecord): void {
     rec.updatedAt = Date.now();
     this.records.set(rec.id, rec);
+    // Session file is the source of truth — write synchronously so reads
+    // (recall, search, restore) always see the latest state.
     this.store.writeSession(rec);
     this.upsertSummary(rec);
-    this.store.writeWorkspace(this.meta);
+    // Phase 8: Workspace index is a rebuildable cache — debounce it so
+    // rapid mutations (remember + recordEvent + addUsage) coalesce into
+    // a single index write per request cycle.
+    this.store.writeWorkspaceDebounced(this.meta);
   }
 
   private upsertSummary(rec: SessionRecord): void {

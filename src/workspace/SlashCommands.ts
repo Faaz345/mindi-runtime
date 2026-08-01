@@ -54,6 +54,8 @@ export class SlashCommandRegistry {
     this.register(this.renameCommand());
     this.register(this.deleteCommand());
     this.register(this.archiveCommand());
+    this.register(this.pinCommand());
+    this.register(this.unpinCommand());
     this.register(this.historyCommand());
     this.register(this.resumeCommand());
     this.register(this.clearCommand());
@@ -236,6 +238,42 @@ export class SlashCommandRegistry {
           switchToSessionId: remaining[0]?.id,
           clearScreen: !!remaining[0],
         };
+      },
+    };
+  }
+
+  private pinCommand(): SlashCommand {
+    return {
+      name: "pin",
+      description: "Pin a conversation so it always appears at the top of listings.",
+      usage: "/pin [session-id]",
+      execute: (ctx) => {
+        const arg = ctx.args[0];
+        const id = arg ?? ctx.sessionId;
+        if (!id) return { handled: true, message: "No session to pin." };
+        const all = this.manager.listSessions({ includeArchived: false });
+        const target = all.find((s) => s.id.startsWith(id) || s.id === id);
+        const resolvedId = target?.id ?? id;
+        const rec = this.manager.setPinned(resolvedId, true);
+        return { handled: true, message: `Pinned: ${rec.title}` };
+      },
+    };
+  }
+
+  private unpinCommand(): SlashCommand {
+    return {
+      name: "unpin",
+      description: "Unpin a conversation.",
+      usage: "/unpin [session-id]",
+      execute: (ctx) => {
+        const arg = ctx.args[0];
+        const id = arg ?? ctx.sessionId;
+        if (!id) return { handled: true, message: "No session to unpin." };
+        const all = this.manager.listSessions({ includeArchived: false });
+        const target = all.find((s) => s.id.startsWith(id) || s.id === id);
+        const resolvedId = target?.id ?? id;
+        const rec = this.manager.setPinned(resolvedId, false);
+        return { handled: true, message: `Unpinned: ${rec.title}` };
       },
     };
   }

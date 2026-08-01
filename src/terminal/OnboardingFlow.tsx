@@ -33,17 +33,14 @@ interface ProviderPreset {
 }
 
 const PRESETS: ProviderPreset[] = [
-  { id: "tokenrouter", label: "TokenRouter", description: "Access any model via TokenRouter", type: "openai-compatible", baseUrl: "https://api.tokenrouter.com/v1", needsApiKey: true },
-  { id: "openrouter", label: "OpenRouter", description: "100+ models through one API", type: "openai-compatible", baseUrl: "https://openrouter.ai/api/v1", needsApiKey: true },
-  { id: "openai", label: "OpenAI", description: "GPT-4o, o1, and more", type: "openai-compatible", baseUrl: "https://api.openai.com/v1", needsApiKey: true },
+  { id: "openai", label: "OpenAI", description: "GPT-4o, o1, o3, and more", type: "openai-compatible", baseUrl: "https://api.openai.com/v1", needsApiKey: true },
+  { id: "anthropic", label: "Anthropic", description: "Claude 4, Claude 3.5 Sonnet", type: "openai-compatible", baseUrl: "https://api.anthropic.com/v1", needsApiKey: true },
   { id: "gemini", label: "Google Gemini", description: "Gemini 2.5 Pro/Flash", type: "gemini", baseUrl: "https://generativelanguage.googleapis.com/v1beta", needsApiKey: true },
-  { id: "groq", label: "Groq", description: "Ultra-fast inference", type: "openai-compatible", baseUrl: "https://api.groq.com/openai/v1", needsApiKey: true },
-  { id: "together", label: "Together AI", description: "Open-source models at scale", type: "openai-compatible", baseUrl: "https://api.together.xyz/v1", needsApiKey: true },
-  { id: "fireworks", label: "Fireworks AI", description: "Fast + cheap inference", type: "openai-compatible", baseUrl: "https://api.fireworks.ai/inference/v1", needsApiKey: true },
-  { id: "deepseek", label: "DeepSeek", description: "DeepSeek models", type: "openai-compatible", baseUrl: "https://api.deepseek.com/v1", needsApiKey: true },
-  { id: "ollama", label: "Ollama", description: "Run models locally (no API key)", type: "openai-compatible", baseUrl: "http://localhost:11434/v1", authMethod: "none", needsApiKey: false },
-  { id: "lmstudio", label: "LM Studio", description: "Local model server (no API key)", type: "openai-compatible", baseUrl: "http://localhost:1234/v1", authMethod: "none", needsApiKey: false },
-  { id: "azure", label: "Azure OpenAI", description: "Enterprise OpenAI on Azure", type: "openai-compatible", needsApiKey: true },
+  { id: "deepseek", label: "DeepSeek", description: "DeepSeek-V3, DeepSeek-R1", type: "openai-compatible", baseUrl: "https://api.deepseek.com/v1", needsApiKey: true },
+  { id: "groq", label: "Groq", description: "Ultra-fast inference (Llama, Mixtral)", type: "openai-compatible", baseUrl: "https://api.groq.com/openai/v1", needsApiKey: true },
+  { id: "mistral", label: "Mistral AI", description: "Mistral Large, Codestral", type: "openai-compatible", baseUrl: "https://api.mistral.ai/v1", needsApiKey: true },
+  { id: "ollama", label: "Ollama (local)", description: "Run models locally (no API key)", type: "openai-compatible", baseUrl: "http://localhost:11434/v1", authMethod: "none", needsApiKey: false },
+  { id: "lmstudio", label: "LM Studio (local)", description: "Local model server (no API key)", type: "openai-compatible", baseUrl: "http://localhost:1234/v1", authMethod: "none", needsApiKey: false },
   { id: "custom", label: "Custom Provider", description: "Any OpenAI-compatible endpoint", type: "openai-compatible", needsApiKey: true },
 ];
 
@@ -56,6 +53,7 @@ type Phase =
   | "scanning"
   | "key-select"
   | "provider-select"
+  | "custom-name"
   | "api-key"
   | "custom-url"
   | "connecting"
@@ -73,14 +71,15 @@ interface ProgressStep {
 // Component
 // ---------------------------------------------------------------------------
 
-export function OnboardingFlow({ onComplete }: { onComplete: (config: OnboardingConfig) => void }): React.ReactElement {
+export function OnboardingFlow({ onComplete, repair }: { onComplete: (config: OnboardingConfig) => void; repair?: boolean }): React.ReactElement {
   const { exit } = useApp();
   const onCompleteRef = useRef(onComplete);
   onCompleteRef.current = onComplete;
-  const [phase, setPhase] = useState<Phase>("welcome");
+  const [phase, setPhase] = useState<Phase>(repair ? "provider-select" : "welcome");
   const [selectedPreset, setSelectedPreset] = useState<ProviderPreset | null>(null);
   const [apiKey, setApiKey] = useState("");
   const [customUrl, setCustomUrl] = useState("");
+  const [customDisplayName, setCustomDisplayName] = useState("");
   const [_provider, setProvider] = useState<IProvider | null>(null);
   const [models, setModels] = useState<ProviderModel[]>([]);
   const [selectedModel, setSelectedModel] = useState<string>("");
@@ -141,6 +140,23 @@ export function OnboardingFlow({ onComplete }: { onComplete: (config: Onboarding
     }
   });
 
+  // ---- Custom Display Name Input ----
+  useInput((_input, key) => {
+    if (phase !== "custom-name") return;
+    if (key.return) {
+      const name = customDisplayName.trim();
+      if (name) {
+        // Apply the user-defined name as the preset label.
+        const preset = selectedPreset!;
+        preset.label = name;
+        setCustomUrl("");
+        setPhase("custom-url");
+      }
+      return;
+    }
+    if (key.ctrl && _input === "c") exit();
+  });
+
   // ---- Scanning for API keys ----
   useEffect(() => {
     if (phase !== "scanning") return;
@@ -168,10 +184,10 @@ export function OnboardingFlow({ onComplete }: { onComplete: (config: Onboarding
     if (key.return) {
       const preset = PRESETS[cursor]!;
       setSelectedPreset(preset);
-      // For custom provider, start with empty URL.
+      // For custom provider, first ask for a display name.
       if (preset.id === "custom") {
-        setCustomUrl("");
-        setPhase("custom-url");
+        setCustomDisplayName("");
+        setPhase("custom-name");
       } else if (preset.needsApiKey) {
         // For known providers, pre-fill the base URL but let user edit it.
         setCustomUrl(preset.baseUrl ?? "");
@@ -255,25 +271,25 @@ export function OnboardingFlow({ onComplete }: { onComplete: (config: Onboarding
       { label: `Connecting to ${displayName}...`, status: "active" },
       { label: `Validating credentials...`, status: "pending" },
       { label: `Discovering available models...`, status: "pending" },
-      { label: `Detecting capabilities...`, status: "pending" },
+      { label: `Probing model capabilities...`, status: "pending" },
     ]);
 
     // Build provider entry — use customUrl if set (for custom providers).
-    // displayName = preset.id so provider.id matches config id.
     const baseUrl = customUrl.trim() || preset.baseUrl;
+    const providerId = preset.id === "custom" ? `custom-${Date.now().toString(36)}` : preset.id;
     const entry: ProviderEntry = {
       type: preset.type,
       apiKey: key || undefined,
       baseUrl: baseUrl,
       authMethod: preset.authMethod ?? (key ? "bearer" : "none"),
-      displayName: preset.id,
+      displayName: displayName,
       enabled: true,
     };
-    const resolved = resolveProviderEntry(preset.id, entry);
+    const resolved = resolveProviderEntry(providerId, entry);
 
     // Instantiate provider.
     try {
-      const providers = loadProvidersFromConfig({ [preset.id]: resolved });
+      const providers = loadProvidersFromConfig({ [providerId]: resolved });
       if (providers.length === 0) {
         throw new Error(`Could not initialize ${displayName} provider`);
       }
@@ -318,7 +334,7 @@ export function OnboardingFlow({ onComplete }: { onComplete: (config: Onboarding
         setPhase("model-select");
         setCursor(0);
       } else {
-        // No models listed — let user type a model name (opaque providers like TokenRouter).
+        // No models listed — let user type a model name (opaque aggregator providers).
         setPhase("model-select");
       }
     } catch (err) {
@@ -335,36 +351,63 @@ export function OnboardingFlow({ onComplete }: { onComplete: (config: Onboarding
     if (hasSavedRef.current) return;
     hasSavedRef.current = true;
 
-    const config = createEmptyConfig();
-    config.primaryProvider = selectedPreset.id;
-    config.primaryModel = selectedModel;
+    const run = async () => {
+      const config = createEmptyConfig();
 
-    const actualBaseUrl = customUrl.trim() || selectedPreset.baseUrl;
-    const providerId = selectedPreset.id;
-    const entry: ProviderEntry = {
-      type: selectedPreset.type,
-      apiKey: apiKey || undefined,
-      baseUrl: actualBaseUrl,
-      authMethod: selectedPreset.authMethod ?? (apiKey ? "bearer" : "none"),
-      displayName: providerId,
-      enabled: true,
+      // Provider id: use preset id for known providers, slug for custom.
+      const providerId = selectedPreset.id === "custom"
+        ? `custom-${selectedPreset.label.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "")}`
+        : selectedPreset.id;
+      const displayName = selectedPreset.label;
+
+      config.primaryProvider = providerId;
+      config.primaryModel = selectedModel;
+
+      const actualBaseUrl = customUrl.trim() || selectedPreset.baseUrl;
+      const entry: ProviderEntry = {
+        type: selectedPreset.type,
+        apiKey: apiKey || undefined,
+        baseUrl: actualBaseUrl,
+        authMethod: selectedPreset.authMethod ?? (apiKey ? "bearer" : "none"),
+        displayName: displayName,
+        enabled: true,
+      };
+      config.providers[providerId] = resolveProviderEntry(providerId, entry);
+
+      // Probe model capabilities (non-blocking — best effort).
+      try {
+        const providers = loadProvidersFromConfig({ [providerId]: resolveProviderEntry(providerId, entry) });
+        if (providers.length > 0) {
+          const decl = await providers[0]!.declareCapability(selectedModel);
+          // Store capability profile in provider metadata.
+          config.providers[providerId]!.metadata = {
+            capabilities: decl.capabilities,
+            streaming: decl.streaming,
+            toolCalling: decl.toolCalling,
+            multimodal: decl.multimodal,
+            maxContext: decl.maxContext,
+            probedAt: Date.now(),
+          };
+        }
+      } catch {
+        // Capability probing is best-effort — don't block onboarding.
+      }
+
+      config.preferDeterministicTools = true;
+      config.sandbox.allowedRoots = [process.cwd()];
+      config.sandbox.allowedCommands = ["git", "node", "npm", "npx", "tsx"];
+      config.sandbox.allowNetwork = true;
+      config.onboarded = true;
+
+      setPhase("saving");
+      saveConfig(config);
+
+      setTimeout(() => {
+        onCompleteRef.current(config);
+      }, 500);
     };
-    config.providers[providerId] = resolveProviderEntry(providerId, entry);
 
-    config.preferDeterministicTools = true;
-    config.sandbox.allowedRoots = [process.cwd()];
-    config.sandbox.allowedCommands = ["git", "node", "npm", "npx", "tsx"];
-    config.sandbox.allowNetwork = true; // Enable network for search, HTTP, browser tools
-    config.onboarded = true;
-
-    setPhase("saving");
-    saveConfig(config);
-
-    const t = setTimeout(() => {
-      onCompleteRef.current(config);
-    }, 500);
-
-    return () => clearTimeout(t);
+    void run();
   }, [phase, selectedPreset, selectedModel, apiKey, customUrl]);
 
   // ---- Render ----
@@ -454,8 +497,17 @@ export function OnboardingFlow({ onComplete }: { onComplete: (config: Onboarding
   if (phase === "provider-select") {
     return (
       <Box flexDirection="column" padding={1}>
-        <Text bold color={COLORS.azure}>Select your AI provider</Text>
-        <Text color={COLORS.white}>Choose the provider you want as your primary reasoning engine.</Text>
+        {repair ? (
+          <>
+            <Text bold color="yellow">⚠ Provider configuration needs repair</Text>
+            <Text color={COLORS.white}>Select a provider to restore connectivity.</Text>
+          </>
+        ) : (
+          <>
+            <Text bold color={COLORS.azure}>Select your AI provider</Text>
+            <Text color={COLORS.white}>Choose the provider you want as your primary reasoning engine.</Text>
+          </>
+        )}
         <Box marginTop={1} flexDirection="column">
           {PRESETS.map((preset, i) => (
             <Box key={preset.id} gap={1}>
@@ -497,6 +549,26 @@ export function OnboardingFlow({ onComplete }: { onComplete: (config: Onboarding
           <Text color={COLORS.dim}>Press Enter when done · Ctrl+C Exit</Text>
         </Box>
         {error && <Text color="red">✗ {error}</Text>}
+      </Box>
+    );
+  }
+
+  if (phase === "custom-name") {
+    return (
+      <Box flexDirection="column" padding={1}>
+        <Text bold color={COLORS.azure}>Name your provider</Text>
+        <Text color={COLORS.white}>This name will be shown throughout the Runtime UI (header, status, diagnostics).</Text>
+        <Box marginTop={1}>
+          <Text color={COLORS.sky}>{"› "}</Text>
+          <TextInput
+            value={customDisplayName}
+            onChange={setCustomDisplayName}
+            placeholder="e.g. My Company AI, Internal LLM, etc."
+          />
+        </Box>
+        <Box marginTop={1}>
+          <Text color={COLORS.dim}>Press Enter to continue</Text>
+        </Box>
       </Box>
     );
   }

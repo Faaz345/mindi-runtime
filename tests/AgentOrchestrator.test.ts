@@ -186,7 +186,9 @@ describe("AgentOrchestrator — Plan → Execute → Observe → Reflect → Con
     const fileEv = events.find((e) => e.type === "file");
     expect(fileEv && fileEv.verified).toBe(true);
 
-    const toolEv = events.find((e) => e.type === "tool");
+    const toolEv = events.find((e) => e.type === "tool" && e.phase === "finished") as
+      | Extract<StreamEvent, { type: "tool" }>
+      | undefined;
     expect(toolEv && toolEv.phase).toBe("finished");
     expect(toolEv && toolEv.ok).toBe(true);
 
@@ -319,7 +321,9 @@ describe("AgentOrchestrator — Plan → Execute → Observe → Reflect → Con
       workspace: tmpDir,
     }));
     expect(result.goalCompleted).toBe(true);
-    const toolEv = events.find((e) => e.type === "tool");
+    const toolEv = events.find((e) => e.type === "tool" && e.phase === "finished") as
+      | Extract<StreamEvent, { type: "tool" }>
+      | undefined;
     expect(toolEv && toolEv.ok).toBe(false);
   });
 

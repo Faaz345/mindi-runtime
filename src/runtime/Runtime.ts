@@ -20,6 +20,7 @@ import { Logger, type LogLevel } from "../logging/Logger.js";
 import { CapabilityRegistry } from "../registry/CapabilityRegistry.js";
 import { ToolRuntime } from "../tools/ToolRuntime.js";
 import { ProviderManager } from "../providers/ProviderManager.js";
+import { ProviderRouter, type RouteDecision } from "../providers/ProviderRouter.js";
 import { loadProvidersFromConfig } from "../providers/provider-loader.js";
 import { IntentAnalyzer } from "../intent/IntentAnalyzer.js";
 import { CapabilityPlanner } from "../planner/CapabilityPlanner.js";
@@ -35,7 +36,7 @@ import {
   type StreamEvent,
 } from "../streaming/StreamingEngine.js";
 import { CapabilityAvailabilityTracker } from "../tools/CapabilityAvailabilityTracker.js";
-import { createNetworkPolicy, booleanToPolicy } from "../tools/NetworkPolicy.js";
+import { createNetworkPolicy, booleanToPolicy, checkNetworkAccess } from "../tools/NetworkPolicy.js";
 import { WorkspaceStore } from "../workspace/WorkspaceStore.js";
 import { ProjectMemoryManager } from "../workspace/ProjectMemory.js";
 import { ContextCompressor } from "../workspace/ContextCompressor.js";
@@ -53,6 +54,22 @@ import type { RefreshReport } from "../capability/types.js";
 import { TaskPlanner } from "../planner/TaskPlanner.js";
 import { AgentOrchestrator, type AgentRunResult } from "../agent/AgentOrchestrator.js";
 import { isVisionRefusal } from "../agent/visionRefusal.js";
+import { VisionPolicy, type VisionDecision, type VisionPreference } from "../agent/VisionPolicy.js";
+// Capability Augmentation System — the Runtime enriches BEFORE the model reasons.
+import {
+  CapabilityAugmentationRouter,
+  AugmentationModuleRegistry,
+  AugmentationPolicy,
+  ResponseValidator,
+  ModelHealthTracker,
+  VisionAugment,
+  HttpAugment,
+  FilesystemAugment,
+  WebSearchAugment,
+  GitAugment,
+} from "../augmentation/index.js";
+import type { AugmentationContext, AugmentationResult, StructuredContextBlock } from "../augmentation/index.js";
+import { UnifiedPromptBuilder } from "../context/UnifiedPromptBuilder.js";
 
 /**
  * Runtime
@@ -101,6 +118,18 @@ export class Runtime {
   readonly modelCapabilities: ModelCapabilityRegistry;
   /** Workspace session system (null when workspace.enabled = false). */
   readonly workspace: WorkspaceSystem | null;
+  /** Capability Augmentation Router — enriches requests BEFORE the model reasons. */
+  readonly augmentationRouter: CapabilityAugmentationRouter;
+  /** Augmentation module registry — extensible capability modules. */
+  readonly augmentationRegistry: AugmentationModuleRegistry;
+  /** Augmentation policy — user consent management. */
+  readonly augmentationPolicy: AugmentationPolicy;
+  /** Response validator — anti-hallucination enforcement. */
+  readonly responseValidator: ResponseValidator;
+  /** Model health tracker — operational state for routing decisions. */
+  readonly healthTracker: ModelHealthTracker;
+  /** Unified prompt builder — single builder for both modes. */
+  readonly promptBuilder: UnifiedPromptBuilder;
 
   private readonly logLevel: LogLevel;
 
@@ -134,9 +163,17 @@ export class Runtime {
       this.config.sandbox,
       this.networkPolicy,
     );
-    this.availability.initialScan();
+    // Phase 8: Defer the initial scan so the constructor returns immediately
+    // and the terminal becomes interactive faster. The scan runs on the next
+    // tick — tools are still discovered before the first request completes.
+    setImmediate(() => this.availability.initialScan());
     this.intent = new IntentAnalyzer();
-    this.planner = new CapabilityPlanner(this.registry, this.availability, this.modelCapabilities);
+    this.planner = new CapabilityPlanner(
+      this.registry,
+      this.availability,
+      this.modelCapabilities,
+      (type) => this.providers.selectFor(type).length > 0,
+    );
     this.taskPlanner = new TaskPlanner();
     this.router = new CapabilityRouter(this.registry);
     this.executionPlanner = new ExecutionPlanner();
@@ -150,6 +187,46 @@ export class Runtime {
     this.workspace = this.config.workspace.enabled
       ? this.initWorkspace()
       : null;
+    // ---- Capability Augmentation System ----
+    // The Runtime enriches BEFORE the model reasons. Every request passes
+    // through the augmentation router first.
+    this.augmentationRegistry = new AugmentationModuleRegistry();
+    this.augmentationRegistry
+      .register(new VisionAugment())
+      .register(new HttpAugment())
+      .register(new FilesystemAugment())
+      .register(new WebSearchAugment())
+      .register(new GitAugment());
+    this.augmentationPolicy = new AugmentationPolicy(
+      this.workspace?.projectMemory ?? { getPreference: () => undefined, setPreference: () => {} },
+    );
+    this.responseValidator = new ResponseValidator();
+    this.healthTracker = new ModelHealthTracker();
+    this.promptBuilder = new UnifiedPromptBuilder();
+    // Build the augmentation context (provides access to providers/sandbox).
+    const augmentationCtx: AugmentationContext = {
+      ctx: { requestId: "", sessionId: "", signal: new AbortController().signal, log: this.log.child({ component: "augmentation" }), events: this.events },
+      getProvider: (id) => {
+        const p = this.providers.get(id);
+        if (!p) return undefined;
+        return { id: p.id, label: p.label, executeCapability: (type, input, ctx) => p.executeCapability(type, input, ctx) };
+      },
+      providersFor: (cap) => {
+        return this.providers.selectFor(cap).map((p) => ({
+          id: p.id,
+          label: p.label,
+          executeCapability: (type: any, input: any, ctx: any) => p.executeCapability(type, input, ctx),
+        }));
+      },
+      workspace: this.config.workspace.rootDir,
+      allowedRoots: this.config.sandbox.allowedRoots,
+      isNetworkAllowed: (url) => checkNetworkAccess(url, this.networkPolicy).allowed,
+    };
+    this.augmentationRouter = new CapabilityAugmentationRouter(
+      this.augmentationRegistry,
+      this.augmentationPolicy,
+      augmentationCtx,
+    );
     // Wire metrics collector to the event bus — non-invasive, listen-only.
     this.metrics = new MetricsCollector();
     this.events.onAny((e) => this.metrics.onEvent(e));
@@ -187,7 +264,9 @@ export class Runtime {
 
   /** Register built-in providers from config. Generic — no hardcoding. */
   private registerBuiltinProviders(): void {
-    const providers = loadProvidersFromConfig(this.config.providers);
+    const providers = loadProvidersFromConfig(this.config.providers, {
+      primaryModel: this.config.defaultModel,
+    });
     for (const provider of providers) {
       this.providers.register(provider);
     }
@@ -209,6 +288,14 @@ export class Runtime {
   }
 
   /**
+   * Flush all pending debounced writes and release resources.
+   * Phase 8: Ensures no data is lost on process exit.
+   */
+  dispose(): void {
+    this.workspace?.store.flush();
+  }
+
+  /**
    * Rebuild the capability registry from fresh provider metadata.
    * Reconnects to every configured provider, refreshes metadata, updates
    * the persistent cache. Returns a summary report.
@@ -227,6 +314,25 @@ export class Runtime {
 
   getSession(id: string): Session {
     return this.sessions.get(id);
+  }
+
+  /**
+   * Unified model change — updates BOTH the in-memory SessionManager and the
+   * persistent WorkspaceSessionManager so they never diverge. This is the
+   * single entry point for model swaps (Phase 6 unification).
+   */
+  setSessionModel(sessionId: string, providerId: string, modelId: string): void {
+    // In-memory (request lifecycle).
+    if (this.sessions.has(sessionId)) {
+      this.sessions.setModel(sessionId, providerId, modelId);
+    }
+    // Persistent (workspace).
+    if (this.workspace) {
+      const rec = this.workspace.sessionManager.get(sessionId);
+      if (rec) {
+        this.workspace.sessionManager.setModel(sessionId, providerId, modelId);
+      }
+    }
   }
 
   // ---- Workspace (persistent sessions) --------------------------------
@@ -296,6 +402,70 @@ export class Runtime {
   /** True if a `.mindi` workspace already exists in the configured root. */
   hasWorkspace(): boolean {
     return this.workspace?.store.exists() ?? false;
+  }
+
+  // ---- Vision Policy (Phase 4) ------------------------------------------
+
+  /**
+   * Determine the vision strategy for a request BEFORE streaming begins.
+   * The Terminal calls this to decide whether to prompt the user.
+   *
+   * Deterministic: same inputs → same output, every time.
+   */
+  async getVisionDecision(sessionId: string, modelId: string, hasImages: boolean): Promise<VisionDecision> {
+    const session = this.sessions.get(sessionId);
+    const provider = this.providers.getPrimary(session.providerId);
+
+    // Check if the primary model has native vision.
+    const profile = await this.modelCapabilities.ensure(provider.id, modelId);
+    const caps = new Set(profileToCapabilityTypes(profile));
+    const modelHasVision = caps.has("vision" as CapabilityType);
+
+    // Read stored preference.
+    const prefStore = this.workspace?.projectMemory ?? null;
+    const preference: VisionPreference = prefStore
+      ? VisionPolicy.readPreference(prefStore)
+      : { fallbackAllowed: null };
+
+    // Resolve candidates deterministically (only needed if model lacks vision).
+    let candidates: Array<{ providerId: string; modelId: string }> = [];
+    if (!modelHasVision && hasImages) {
+      const visionProviders = this.providers.selectFor("vision" as CapabilityType);
+      const modelLists = new Map<string, ProviderModel[]>();
+      for (const p of visionProviders) {
+        try {
+          modelLists.set(p.id, await p.listModels());
+        } catch {
+          // Provider unreachable — skip.
+        }
+      }
+      candidates = VisionPolicy.resolveCandidates(visionProviders, provider.id, modelId, modelLists);
+    }
+
+    return VisionPolicy.decide(hasImages, modelHasVision, provider.id, modelId, preference, candidates);
+  }
+
+  /**
+   * Store the user's vision fallback preference (called after the Terminal
+   * prompts the user). Persists per-workspace via ProjectMemory.
+   */
+  setVisionPreference(allowed: boolean, providerId?: string, modelId?: string): void {
+    const prefStore = this.workspace?.projectMemory;
+    if (!prefStore) return;
+    VisionPolicy.writePreference(prefStore, {
+      fallbackAllowed: allowed,
+      fallbackProviderId: providerId,
+      fallbackModelId: modelId,
+    });
+  }
+
+  /**
+   * Reset the vision preference (via /vision reset).
+   */
+  resetVisionPreference(): void {
+    const prefStore = this.workspace?.projectMemory;
+    if (!prefStore) return;
+    VisionPolicy.resetPreference(prefStore);
   }
 
   /**
@@ -383,8 +553,25 @@ export class Runtime {
     const imageReadWarning = pathResult?.warning;
     const requestId = req.requestId ?? randomUUID();
     const session = this.sessions.get(req.sessionId);
-    const provider = this.providers.getPrimary(session.providerId);
-    const modelId = req.modelId ?? session.modelId;
+
+    // Phase 5: Priority-based provider resolution (deterministic).
+    // Priority: explicit → session → workspace → config → capability.
+    // Auto-restore is inherent: each request resolves fresh, failover never sticks.
+    const wsSettings = this.workspace?.store.readWorkspace().settings;
+    const routeDecision: RouteDecision = ProviderRouter.resolve({
+      explicitProviderId: undefined, // req.modelId is model-only; provider comes from session
+      explicitModelId: req.modelId,
+      sessionProviderId: session.providerId,
+      sessionModelId: session.modelId,
+      workspaceProviderId: wsSettings?.defaultProviderId,
+      workspaceModelId: wsSettings?.defaultModelId,
+      configProviderId: this.config.defaultProviderId,
+      configModel: this.config.defaultModel,
+      autoFailover: (wsSettings?.preferences?.["provider.autoFailover"] as boolean) ?? false,
+    }, new Map(this.providers.listProviders().map((p) => [p.id, p])));
+
+    const provider = this.providers.getPrimary(routeDecision.providerId);
+    const modelId = routeDecision.modelId;
 
     // Build the execution context (correlation id, logger, cancellation, bus).
     // No timeout — let the provider stream until it finishes naturally.
@@ -491,6 +678,51 @@ export class Runtime {
       const profile = await this.modelCapabilities.ensure(provider.id, modelId);
       const modelCapabilities = new Set<CapabilityType>(profileToCapabilityTypes(profile));
 
+      // ---- CAPABILITY AUGMENTATION ROUTER ----
+      // The Runtime enriches BEFORE the model reasons. Run the augmentation
+      // router to detect and fill capability gaps transparently.
+      let augmentationResult: AugmentationResult | null = null;
+      try {
+        augmentationResult = await this.augmentationRouter.route({
+          text: req.text,
+          attachments: req.attachments ?? [],
+          sessionId: session.id,
+          requestId,
+          providerId: provider.id,
+          modelId,
+          modelProfile: profile,
+          history: [],
+          mode: req.mode,
+        });
+        // Merge augmentation results into capability messages.
+        for (const record of augmentationResult.augmentations) {
+          if (record.action === "augmented" && record.ok) {
+            usedCapabilityTypes.push(record.capability);
+          }
+        }
+        // Emit augmentation events for the Timeline.
+        for (const record of augmentationResult.augmentations) {
+          if (record.action === "augmented") {
+            yield {
+              type: "capability",
+              capabilityType: record.capability,
+              source: record.via ?? "augmentation",
+              ok: record.ok ?? false,
+              durationMs: record.durationMs,
+              preview: record.reason,
+            };
+          }
+        }
+        ctx.log.info("augmentation.complete", {
+          route: augmentationResult.route,
+          augmented: augmentationResult.augmentations.filter((a) => a.action === "augmented").length,
+          unavailable: augmentationResult.unavailable.length,
+        });
+      } catch (err) {
+        // Augmentation failure is non-fatal — log and continue with the old pipeline.
+        ctx.log.warn("augmentation.error", { error: err instanceof Error ? err.message : String(err) });
+      }
+
       // 5. Build the augmented message list for the primary model.
       // If the model has native vision, embed images directly as multimodal
       // content so the model actually SEES them (no hallucinated analysis).
@@ -501,6 +733,25 @@ export class Runtime {
       // verify the image actually made it into the request).
       if (imageParts.length > 0) {
         yield { type: "attachment", kind: "image", count: imageParts.length, sizeBytes: imageBytes };
+      }
+      // Phase 4: Emit the vision strategy decision for the Timeline.
+      // Always transparent — the user sees exactly which provider handles vision.
+      const hasImages = imageParts.length > 0 || intent.requiredCapabilities.includes("vision" as CapabilityType);
+      if (hasImages) {
+        const modelHasVision = modelCapabilities.has("vision" as CapabilityType);
+        if (modelHasVision) {
+          yield { type: "vision", action: "native", provider: provider.id, model: modelId, reason: `Native vision via ${provider.id}/${modelId}` };
+        } else {
+          const prefStore = this.workspace?.projectMemory ?? null;
+          const pref: VisionPreference = prefStore ? VisionPolicy.readPreference(prefStore) : { fallbackAllowed: null };
+          if (pref.fallbackAllowed === false) {
+            yield { type: "vision", action: "denied", reason: "Vision fallback disabled by user preference" };
+          } else if (pref.fallbackAllowed === true && pref.fallbackProviderId) {
+            yield { type: "vision", action: "fallback", provider: pref.fallbackProviderId, model: pref.fallbackModelId, reason: `Fallback vision via ${pref.fallbackProviderId}/${pref.fallbackModelId}` };
+          }
+          // If no preference yet, the visionRefusalFallback path will handle it
+          // (only triggers if the model actually refuses the image).
+        }
       }
       // When images are embedded, anchor the model on the image. Weak vision
       // models otherwise ignore the image and hallucinate from system context.
@@ -555,6 +806,22 @@ export class Runtime {
       });
 
       const agentMode = req.mode !== "plan" && taskPlan.kind === "agentic";
+
+      // Inject augmentation context blocks (from the Capability Augmentation Router).
+      // These are StructuredContextBlocks converted to capability messages.
+      const augmentationMessages: ChatMessage[] = [];
+      if (augmentationResult) {
+        // Extract only the capability/system messages from enrichedMessages
+        // (skip history and user message — those are handled separately).
+        for (const msg of augmentationResult.enrichedMessages) {
+          const isCapability = msg.role === "capability";
+          const isAugmentationSystem = msg.role === "system" && typeof msg.content === "string" && msg.content.includes("MINDI Runtime gathered");
+          if (isCapability || isAugmentationSystem) {
+            augmentationMessages.push(msg);
+          }
+        }
+      }
+
       const systemPrompt = this.context.buildSystemPrompt({
         availableCapabilities: availableCaps,
         unavailableCapabilities: unavailableCaps,
@@ -570,6 +837,7 @@ export class Runtime {
         { role: "system", content: systemPrompt },
         ...truncatedHistory.filter((m) => m.role !== "system"),
         ...capabilityMessages,
+        ...augmentationMessages,
         userMessage,
       ];
       // Unreadable image path — warn EVERY model (not just vision-native
@@ -713,9 +981,47 @@ export class Runtime {
       let usage: { promptTokens?: number; completionTokens?: number; totalTokens?: number } | undefined;
 
       try {
-        const turn = yield* this.streamChatTurn(provider, chatRequest, ctx);
-        fullText = turn.text;
-        usage = turn.usage;
+        // Phase 5: Failover-aware streaming. If the primary provider fails
+        // and auto-failover is enabled, try alternatives in priority order.
+        // Each failover emits an event explaining exactly why the switch happened.
+        // Auto-restore is inherent: the next request resolves fresh from the
+        // priority chain, so the user's preferred provider is always restored.
+        let turn: { text: string; usage?: ChatChunk["usage"] };
+        const streamStart = Date.now();
+        try {
+          turn = yield* this.streamChatTurn(provider, chatRequest, ctx);
+          // Record success for circuit breaker.
+          this.healthTracker.record(provider.id, modelId, true, Date.now() - streamStart);
+        } catch (primaryErr) {
+          // Record failure for circuit breaker.
+          this.healthTracker.record(provider.id, modelId, false, Date.now() - streamStart);
+          if (routeDecision.alternatives.length === 0) throw primaryErr;
+          // Try failover alternatives in deterministic order.
+          let failoverSuccess = false;
+          for (const alt of routeDecision.alternatives) {
+            const altProvider = this.providers.get(alt.providerId);
+            if (!altProvider) continue;
+            // Skip circuit-broken models.
+            if (this.healthTracker.shouldAvoid(alt.providerId, alt.modelId)) continue;
+            const failoverReason = `${routeDecision.providerId} failed (${toMindiError(primaryErr).code}) — failing over to ${alt.providerId}`;
+            ctx.log.warn("provider.failover", { from: routeDecision.providerId, to: alt.providerId, reason: failoverReason });
+            yield { type: "provider_failover", from: routeDecision.providerId, to: alt.providerId, reason: failoverReason };
+            this.events.emit({ type: "provider:stream", requestId, providerId: alt.providerId, model: alt.modelId, timestamp: Date.now() });
+            const altStart = Date.now();
+            try {
+              turn = yield* this.streamChatTurn(altProvider, { ...chatRequest, model: alt.modelId }, ctx);
+              this.healthTracker.record(alt.providerId, alt.modelId, true, Date.now() - altStart);
+              failoverSuccess = true;
+              break;
+            } catch {
+              this.healthTracker.record(alt.providerId, alt.modelId, false, Date.now() - altStart);
+              continue; // Try next alternative.
+            }
+          }
+          if (!failoverSuccess) throw primaryErr;
+        }
+        fullText = turn!.text;
+        usage = turn!.usage;
 
         // ---- VISION-REFUSAL FALLBACK ----------------------------------
         // The runtime attached an image, but the model replied with a
@@ -736,6 +1042,29 @@ export class Runtime {
           if (retry) {
             fullText = retry.text;
             usage = retry.usage ?? usage;
+          }
+        }
+
+        // ---- RESPONSE VALIDATION (anti-hallucination) -----------------
+        // Verify the model didn't fabricate tool execution, file ops, or
+        // network results that the runtime didn't actually perform.
+        if (fullText.trim()) {
+          const actualBlocks: StructuredContextBlock[] = (augmentationResult?.augmentations ?? [])
+            .filter((a) => a.action === "augmented")
+            .map((a) => ({
+              capability: a.capability,
+              source: a.via ?? "augmentation",
+              ok: a.ok ?? false,
+              summary: a.reason,
+              detail: "",
+              metadata: {},
+              durationMs: a.durationMs,
+            }));
+          const validation = this.responseValidator.validate(fullText, actualBlocks);
+          if (!validation.valid && validation.correction) {
+            ctx.log.warn("response.fabrication", { count: validation.fabrications.length });
+            // Append a correction note so the user knows the model overstepped.
+            fullText += `\n\n---\n_\u26a0\ufe0f MINDI Runtime note: The model claimed actions it did not perform. ${validation.fabrications.map((f) => f.claim).join("; ")}. No tools were executed by the runtime for this response._`;
           }
         }
 
@@ -765,12 +1094,13 @@ export class Runtime {
         }
 
         const durationMs = Date.now() - start;
-        ctx.log.info("request.end", { ok: true, durationMs, tokens: usage?.totalTokens });
+        const streamOk = fullText.trim().length > 0;
+        ctx.log.info("request.end", { ok: streamOk, durationMs, tokens: usage?.totalTokens });
         this.events.emit({
           type: "request:end",
           requestId,
           sessionId: session.id,
-          ok: true,
+          ok: streamOk,
           durationMs,
           timestamp: Date.now(),
         });
@@ -832,43 +1162,118 @@ export class Runtime {
   }
 
   /**
-   * Stream one chat turn: forwards deltas/done as StreamEvents while
-   * accumulating the full text + usage. Extracted so the vision-refusal
-   * fallback can re-run a turn with augmented context.
+   * Stream a single chat turn with timeout protection.
+   *
+   * Three timeout layers prevent a provider from hanging the runtime:
+   *   1. First-chunk timeout — if no chunk arrives within N ms, abort.
+   *   2. Idle timeout — if no chunk arrives for N ms after the first, abort.
+   *   3. Total timeout — the entire turn must complete within requestTimeoutMs.
+   *
+   * On timeout, the AbortController fires, the provider's fetch is cancelled,
+   * and an error event is yielded so the caller can failover.
    */
   private async *streamChatTurn(
     provider: IProvider,
     request: ChatRequest,
     ctx: ExecutionContext,
   ): AsyncGenerator<StreamEvent, { text: string; usage?: ChatChunk["usage"] }, unknown> {
+    const FIRST_CHUNK_TIMEOUT_MS = 60_000;  // 60s to receive the first chunk (free models are slow)
+    const IDLE_TIMEOUT_MS = 90_000;         // 90s between subsequent chunks
+    const TOTAL_TIMEOUT_MS = this.config.requestTimeoutMs; // default 5 min
+
     let text = "";
     let usage: ChatChunk["usage"];
-    const chunkStream = provider.chat(request, ctx);
-    for await (const ev of streamFromChatChunks(chunkStream, ctx)) {
-      if (ev.type === "delta") {
-        text += ev.text;
-        this.events.emit({ type: "provider:chunk", requestId: ctx.requestId, delta: ev.text, timestamp: Date.now() });
-      } else if (ev.type === "done") {
-        usage = ev.usage;
-        this.events.emit({
-          type: "provider:done",
-          requestId: ctx.requestId,
-          finishReason: ev.finishReason ?? "stop",
-          timestamp: Date.now(),
-        });
+    let gotFirstChunk = false;
+    let timedOut = false;
+
+    // Create a child abort controller so we can cancel the provider stream
+    // without affecting the parent request signal.
+    const streamCtrl = new AbortController();
+    const onParentAbort = () => streamCtrl.abort();
+    if (ctx.signal.aborted) streamCtrl.abort();
+    else ctx.signal.addEventListener("abort", onParentAbort, { once: true });
+
+    // Timer management
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const armTimer = (ms: number) => {
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(() => {
+        timedOut = true;
+        streamCtrl.abort();
+      }, ms);
+    };
+
+    // Arm the first-chunk timeout (also bounded by total timeout).
+    armTimer(Math.min(FIRST_CHUNK_TIMEOUT_MS, TOTAL_TIMEOUT_MS));
+    const totalDeadline = setTimeout(() => {
+      timedOut = true;
+      streamCtrl.abort();
+    }, TOTAL_TIMEOUT_MS);
+
+    // Build a child context that carries the stream-specific abort signal.
+    const streamCtx: ExecutionContext = { ...ctx, signal: streamCtrl.signal };
+
+    try {
+      const chunkStream = provider.chat(request, streamCtx);
+      for await (const ev of streamFromChatChunks(chunkStream, streamCtx)) {
+        if (timedOut || streamCtrl.signal.aborted) break;
+
+        if (ev.type === "delta") {
+          if (!gotFirstChunk) {
+            gotFirstChunk = true;
+            // Switch from first-chunk timeout to idle timeout.
+            armTimer(IDLE_TIMEOUT_MS);
+          } else {
+            // Reset idle timer on every chunk.
+            armTimer(IDLE_TIMEOUT_MS);
+          }
+          text += ev.text;
+          this.events.emit({ type: "provider:chunk", requestId: ctx.requestId, delta: ev.text, timestamp: Date.now() });
+        } else if (ev.type === "done") {
+          usage = ev.usage;
+          this.events.emit({
+            type: "provider:done",
+            requestId: ctx.requestId,
+            finishReason: ev.finishReason ?? "stop",
+            timestamp: Date.now(),
+          });
+        } else if (ev.type === "error") {
+          // Provider error — propagate immediately.
+          yield ev;
+          return { text, usage };
+        }
+        yield ev;
       }
-      yield ev;
+
+      // If we broke out of the loop due to timeout, throw so failover kicks in.
+      if (timedOut) {
+        const reason = !gotFirstChunk
+          ? `Provider ${provider.id} did not send any data within ${FIRST_CHUNK_TIMEOUT_MS / 1000}s`
+          : `Provider ${provider.id} stream stalled (no data for ${IDLE_TIMEOUT_MS / 1000}s)`;
+        ctx.log.warn("stream.timeout", { provider: provider.id, reason });
+        throw new MindiError("E_PROVIDER_TIMEOUT", reason);
+      }
+    } finally {
+      if (timer) clearTimeout(timer);
+      clearTimeout(totalDeadline);
+      ctx.signal.removeEventListener("abort", onParentAbort);
     }
+
     return { text, usage };
   }
 
   /**
-   * Vision-refusal fallback. The primary model received an attached image
-   * but answered with a "can't see it" refusal. Run the image through a
-   * dedicated vision capability on an ALTERNATE model/route, then re-ask
-   * the primary model with the analysis injected as capability context.
-   * Returns the new turn's text/usage, or null when no fallback exists
-   * (a warning is emitted so the user knows the answer is unreliable).
+   * Vision-refusal fallback (Phase 4 — deterministic, preference-aware).
+   *
+   * The primary model received an attached image but answered with a
+   * "can't see it" refusal. This method:
+   *   1. Checks the stored user preference — if denied, does NOT retry.
+   *   2. Resolves a fallback model DETERMINISTICALLY via VisionPolicy.
+   *   3. Runs the image through the fallback vision model.
+   *   4. Re-asks the primary model with the analysis as context.
+   *   5. Stores the preference so the user is never asked again.
+   *
+   * NEVER silently switches providers. Every step emits a StreamEvent.
    */
   private async *visionRefusalFallback(opts: {
     provider: IProvider;
@@ -880,25 +1285,56 @@ export class Runtime {
     ctx: ExecutionContext;
   }): AsyncGenerator<StreamEvent, { text: string; usage?: ChatChunk["usage"] } | null, unknown> {
     const { ctx } = opts;
+    ctx.log.warn("vision.refusal_detected", { model: opts.modelId, provider: opts.provider.id });
+
+    // Phase 4: Check stored preference BEFORE attempting fallback.
+    const prefStore = this.workspace?.projectMemory ?? null;
+    const preference: VisionPreference = prefStore
+      ? VisionPolicy.readPreference(prefStore)
+      : { fallbackAllowed: null };
+
+    if (preference.fallbackAllowed === false) {
+      yield { type: "vision", action: "denied", reason: "Vision fallback disabled by user preference. The reply above may be unreliable." };
+      yield {
+        type: "reflection",
+        note: "The model could not see the image, but vision fallback is disabled. Run /vision allow to enable it.",
+        iteration: 0,
+      };
+      return null;
+    }
+
     yield {
       type: "reflection",
-      note: "Model reported it cannot see the attached image — trying a dedicated vision model",
+      note: "Model reported it cannot see the attached image — resolving vision fallback",
       iteration: 0,
     };
-    ctx.log.warn("vision.refusal_detected", { model: opts.modelId, provider: opts.provider.id });
 
     const image = imagePartsToDataUri(opts.imageParts);
     if (!image) return null;
 
-    // 1. Find an alternate vision-capable model (never the one that failed).
+    // Phase 4: Deterministic fallback resolution via VisionPolicy.
     const fallback = await this.resolveFallbackVisionModel(opts.provider.id, opts.modelId);
     if (!fallback) {
+      yield { type: "vision", action: "unavailable", reason: "No alternate vision model available" };
       yield {
         type: "reflection",
         note: "The model could not see the attached image and no alternate vision model is configured. The reply above is unreliable — pick a vision-capable model or add a provider that has one.",
         iteration: 0,
       };
       return null;
+    }
+
+    // Emit which fallback is being used (transparency — never silent).
+    yield { type: "vision", action: "fallback", provider: fallback.provider.id, model: fallback.modelId, reason: `Vision fallback: ${fallback.provider.id}/${fallback.modelId}` };
+
+    // Phase 4: Store the preference so the user is never asked again.
+    // The first successful fallback implicitly records "allowed + this model".
+    if (prefStore) {
+      VisionPolicy.writePreference(prefStore, {
+        fallbackAllowed: true,
+        fallbackProviderId: fallback.provider.id,
+        fallbackModelId: fallback.modelId,
+      });
     }
 
     // 2. Analyze the image with the fallback model.
@@ -968,35 +1404,42 @@ export class Runtime {
   }
 
   /**
-   * Pick an alternate vision-capable model for the refusal fallback.
-   * Excludes the model that just failed; prefers a different provider
-   * route, then non-free tiers (free routes are the ones that usually
-   * drop image parts silently).
+   * Resolve a fallback vision model DETERMINISTICALLY via VisionPolicy.
+   * Alphabetical sort by (providerId, modelId) — same result every time.
+   * Excludes the primary model that just failed.
    */
   private async resolveFallbackVisionModel(
     primaryProviderId: string,
     primaryModelId: string,
   ): Promise<{ provider: IProvider; modelId: string } | null> {
-    const candidates: Array<{ provider: IProvider; modelId: string; score: number }> = [];
-    for (const p of this.providers.selectFor("vision" as CapabilityType)) {
-      let models: ProviderModel[] = [];
+    // Check if a stored preference specifies the exact fallback to use.
+    const prefStore = this.workspace?.projectMemory ?? null;
+    if (prefStore) {
+      const pref = VisionPolicy.readPreference(prefStore);
+      if (pref.fallbackAllowed === true && pref.fallbackProviderId && pref.fallbackModelId) {
+        const storedProvider = this.providers.get(pref.fallbackProviderId);
+        if (storedProvider) {
+          return { provider: storedProvider, modelId: pref.fallbackModelId };
+        }
+      }
+    }
+
+    // Deterministic resolution: alphabetical sort, no scoring heuristics.
+    const visionProviders = this.providers.selectFor("vision" as CapabilityType);
+    const modelLists = new Map<string, ProviderModel[]>();
+    for (const p of visionProviders) {
       try {
-        models = await p.listModels();
+        modelLists.set(p.id, await p.listModels());
       } catch {
         continue;
       }
-      for (const m of models) {
-        if (!m.capabilities.includes("vision" as CapabilityType)) continue;
-        if (p.id === primaryProviderId && m.id === primaryModelId) continue;
-        let score = 0;
-        if (p.id !== primaryProviderId) score += 2; // prefer a different route
-        if (!m.id.endsWith(":free")) score += 1; // prefer non-free tiers
-        candidates.push({ provider: p, modelId: m.id, score });
-      }
     }
-    candidates.sort((a, b) => b.score - a.score);
-    const best = candidates[0];
-    return best ? { provider: best.provider, modelId: best.modelId } : null;
+    const candidates = VisionPolicy.resolveCandidates(visionProviders, primaryProviderId, primaryModelId, modelLists);
+    if (candidates.length === 0) return null;
+
+    const best = candidates[0]!;
+    const bestProvider = visionProviders.find((p) => p.id === best.providerId);
+    return bestProvider ? { provider: bestProvider, modelId: best.modelId } : null;
   }
 
   /**
